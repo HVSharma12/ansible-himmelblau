@@ -1,0 +1,27 @@
+---
+# tasks/configure.yml — render himmelblau.conf (present) or remove it (absent).
+
+- name: Ensure config directory exists
+  ansible.builtin.file:
+    path: "{{ __himmelblau_conf_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: himmelblau_state == "present"
+
+- name: Render himmelblau.conf
+  ansible.builtin.template:
+    src: himmelblau.conf.j2
+    dest: "{{ __himmelblau_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart himmelblau
+  when: himmelblau_state == "present"
+
+- name: Remove himmelblau.conf
+  ansible.builtin.file:
+    path: "{{ __himmelblau_conf_path }}"
+    state: absent
+  when: himmelblau_state == "absent"

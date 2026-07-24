@@ -1,0 +1,66 @@
+{{ ansible_managed | comment }}
+# Managed by ansible-himmelblau — manual changes will be overwritten.
+[global]
+{% if himmelblau_domain | length > 0 %}
+domain = {{ himmelblau_domain }}
+{% endif %}
+{% if himmelblau_app_id | length > 0 %}
+app_id = {{ himmelblau_app_id }}
+{% endif %}
+{% if himmelblau_pam_allow_groups | length > 0 %}
+pam_allow_groups = {{ himmelblau_pam_allow_groups | join(',') }}
+{% endif %}
+{% if himmelblau_local_groups | length > 0 %}
+local_groups = {{ himmelblau_local_groups | join(',') }}
+{% endif %}
+idmap_range = {{ himmelblau_idmap_range }}
+shell = {{ himmelblau_shell }}
+enable_hello = {{ 'true' if himmelblau_enable_hello | bool else 'false' }}
+{% if himmelblau_home_attr | length > 0 %}
+home_attr = {{ himmelblau_home_attr }}
+{% endif %}
+{% if himmelblau_home_alias | length > 0 %}
+home_alias = {{ himmelblau_home_alias }}
+{% endif %}
+{% if himmelblau_home_prefix | length > 0 %}
+home_prefix = {{ himmelblau_home_prefix }}
+{% endif %}
+{% if himmelblau_logon_token_app_id | length > 0 %}
+logon_token_app_id = {{ himmelblau_logon_token_app_id }}
+{% endif %}
+{% if himmelblau_user_map_file | length > 0 %}
+user_map_file = {{ himmelblau_user_map_file }}
+{% endif %}
+{% if himmelblau_idp_provider == 'generic' and himmelblau_oidc_issuer_url | length > 0 %}
+oidc_issuer_url = {{ himmelblau_oidc_issuer_url }}
+{% endif %}
+{% if himmelblau_sudo_groups | length > 0 %}
+sudo_groups = {{ himmelblau_sudo_groups | join(',') }}
+local_sudo_group = {{ himmelblau_local_sudo_group }}
+{% endif %}
+{# Suppress an extra_config key only when the matching typed var actually rendered above, #}
+{# so a typed var wins but an extra_config-only value is never silently dropped. EVERY key #}
+{# rendered in [global] above must join the set or it double-renders: the three always-on #}
+{# keys (idmap_range, shell, enable_hello) seed it; each conditional key adds under its guard. #}
+{% set __ns = namespace(typed=['idmap_range', 'shell', 'enable_hello']) %}
+{% if himmelblau_domain | length > 0 %}{% set __ns.typed = __ns.typed + ['domain'] %}{% endif %}
+{% if himmelblau_app_id | length > 0 %}{% set __ns.typed = __ns.typed + ['app_id'] %}{% endif %}
+{% if himmelblau_pam_allow_groups | length > 0 %}{% set __ns.typed = __ns.typed + ['pam_allow_groups'] %}{% endif %}
+{% if himmelblau_local_groups | length > 0 %}{% set __ns.typed = __ns.typed + ['local_groups'] %}{% endif %}
+{% if himmelblau_home_attr | length > 0 %}{% set __ns.typed = __ns.typed + ['home_attr'] %}{% endif %}
+{% if himmelblau_home_alias | length > 0 %}{% set __ns.typed = __ns.typed + ['home_alias'] %}{% endif %}
+{% if himmelblau_home_prefix | length > 0 %}{% set __ns.typed = __ns.typed + ['home_prefix'] %}{% endif %}
+{% if himmelblau_logon_token_app_id | length > 0 %}{% set __ns.typed = __ns.typed + ['logon_token_app_id'] %}{% endif %}
+{% if himmelblau_user_map_file | length > 0 %}{% set __ns.typed = __ns.typed + ['user_map_file'] %}{% endif %}
+{% if himmelblau_idp_provider == 'generic' and himmelblau_oidc_issuer_url | length > 0 %}{% set __ns.typed = __ns.typed + ['oidc_issuer_url'] %}{% endif %}
+{% if himmelblau_sudo_groups | length > 0 %}{% set __ns.typed = __ns.typed + ['sudo_groups', 'local_sudo_group'] %}{% endif %}
+{% for key, value in (himmelblau_extra_config | dictsort) if key not in __ns.typed %}
+{# A YAML bool would render Python-cased True/False; emit INI-style lowercase like the typed keys. #}
+{{ key }} = {{ (value | ternary('true', 'false')) if (value | type_debug) == 'bool' else value }}
+{% endfor %}
+{% if himmelblau_offline_breakglass_enabled | bool %}
+
+[offline_breakglass]
+enabled = true
+ttl = {{ himmelblau_offline_breakglass_ttl | int }}
+{% endif %}

@@ -1,0 +1,15 @@
+---
+# WARNING - ALLOW-ALL LOGIN.
+#
+# With himmelblau_pam_allow_no_groups: true and no himmelblau_pam_allow_groups,
+# EVERY user in the tenant may log in to these hosts. Use this only in
+# evaluation labs. For production, scope login to named Entra groups with
+# himmelblau_pam_allow_groups instead (see examples/deploy.yml).
+- name: Deploy Himmelblau with allow-all login (evaluation labs only)
+  hosts: workstations
+  become: true
+  vars:
+    himmelblau_domain: contoso.onmicrosoft.com
+    himmelblau_pam_allow_no_groups: true
+  roles:
+    - role: ansible-himmelblau

@@ -1,0 +1,100 @@
+---
+# defaults/main.yml — public API for ansible-himmelblau.
+# Every variable here MUST be documented in README.md.
+
+# Entra ID domain to authenticate against (e.g. "example.onmicrosoft.com"). OPTIONAL: Entra infers
+# it from the first user's UPN when unset. The role requires himmelblau_domain, OR (only when
+# himmelblau_idp_provider is "generic") himmelblau_oidc_issuer_url, unless himmelblau_idp_provider
+# is "none". Rendered only when set.
+himmelblau_domain: ""
+
+# Entra application (client) ID for directory operations. REQUIRED when himmelblau_idp_provider is
+# "generic" (used as the OIDC client id; also reused for logon-token acquisition when
+# himmelblau_logon_token_app_id is unset). Rendered only when set.
+himmelblau_app_id: ""
+
+# Identity provider mode: entra (default, Microsoft Entra ID) | generic (sovereign
+# OIDC via himmelblau_oidc_issuer_url, e.g. Keycloak/Authentik/Zitadel) | none.
+himmelblau_idp_provider: entra
+
+# OIDC issuer URL for himmelblau_idp_provider=generic. Must EXACTLY match the provider's advertised
+# issuer (including any path) or provider discovery fails. Rendered only in that mode.
+himmelblau_oidc_issuer_url: ""
+
+# Entra ID group GUIDs (or UPNs) allowed to log in via PAM. Empty = allow all.
+himmelblau_pam_allow_groups: []
+
+# Local groups Himmelblau users are added to (e.g. ["wheel"] or ["sudo"]).
+himmelblau_local_groups: []
+
+# POSIX UID/GID mapping range.
+himmelblau_idmap_range: "200000-2000200000"
+
+# Default login shell for mapped users.
+himmelblau_shell: "/bin/bash"
+
+# Windows-Hello PIN enrollment (upstream default true). For generic OIDC providers whose client app
+# does NOT allow refresh tokens + the offline_access scope, set this false or Hello enrollment fails
+# at login. See "Generic OIDC" in README.
+himmelblau_enable_hello: true
+
+# Home-directory layout (rendered only when set; empty = himmelblau's own default).
+# home_attr upstream default uuid; home_alias spn; home_prefix e.g. /home/.
+himmelblau_home_attr: ""
+himmelblau_home_alias: ""
+himmelblau_home_prefix: ""
+
+# Optional separate app (client) ID for logon-token scopes. Rendered only when set.
+himmelblau_logon_token_app_id: ""
+
+# Optional path to an external name-mapping file. The role writes only this key;
+# it does not manage the file's contents. Rendered only when set.
+himmelblau_user_map_file: ""
+
+# Any additional [global] himmelblau.conf keys, merged verbatim (key: value).
+# Keys promoted to typed vars above take precedence over the same key here.
+himmelblau_extra_config: {}
+
+# present|absent — install/configure, or remove the role's managed state.
+himmelblau_state: present
+
+# Manage the package repository (add the network:idm repo on SUSE).
+himmelblau_manage_repo: true
+
+# Configure NSS (/etc/nsswitch.conf) for himmelblau resolution.
+himmelblau_configure_nss: true
+
+# Configure the PAM stack (via pam-config on SUSE). Lock-out risk — see README.
+himmelblau_configure_pam: true
+
+# Accept enabling PAM with no login restriction (allow-all login). Default false:
+# the role refuses to wire PAM unless himmelblau_pam_allow_groups scopes login, or
+# this is explicitly true. Admin groups (local_groups/sudo_groups) are post-login
+# membership/sudo and do NOT satisfy this guard. See "Before you enable PAM" in
+# the README.
+himmelblau_pam_allow_no_groups: false
+
+# Start (and restart on change) the himmelblau daemons. Default true. Set false to
+# enable but not start them — e.g. deploy config before an Entra tenant is reachable,
+# or in tenant-less CI. Activation needs a working tenant; see README.
+himmelblau_start_services: true
+
+# Opt-in SSH server enrolment: install the himmelblau sshd config so Entra users can
+# authenticate over SSH. Default false (enabling SSH auth on a fleet is a lock-out
+# vector; upstream already denies SSH password-only by default). See README.
+himmelblau_configure_ssh: false
+
+# Entra group GUIDs whose members get sudo (rendered with local_sudo_group when set).
+himmelblau_sudo_groups: []
+# Local group sudo_groups members are placed into (rendered only when sudo_groups set).
+himmelblau_local_sudo_group: "sudo"
+
+# Opt-in offline break-glass (emergency offline MFA bypass). Renders an
+# [offline_breakglass] section only when enabled; ttl is in seconds.
+himmelblau_offline_breakglass_enabled: false
+himmelblau_offline_breakglass_ttl: 7200
+
+# Package list and repo URL default to distro values from vars/<distro>.yml;
+# override here only to pin or customize.
+himmelblau_packages: "{{ __himmelblau_packages }}"
+himmelblau_repo_url: "{{ __himmelblau_repo_url }}"

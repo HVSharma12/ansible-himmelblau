@@ -1,0 +1,43 @@
+---
+# tasks/service.yml — manage the himmelblau daemons.
+
+# himmelblaud.service declares `SupplementaryGroups=tss` (for TPM/HSM access). systemd REFUSES to
+# start a unit whose SupplementaryGroups names a missing group — failing with status=216/GROUP
+# ("Failed at step GROUP") — and the `tss` group is absent on a minimal SLE/openSUSE image (the TPM2
+# stack is not installed). himmelblau uses a software-HSM fallback when no TPM is present, so the
+# group only needs to EXIST for the daemon to start. Caught by the live-tenant test.
+- name: Ensure the tss group required by himmelblaud.service exists
+  ansible.builtin.group:
+    name: tss
+    system: true
+  when: himmelblau_state == "present"
+
+# Gather known services whenever we must skip units that may not exist yet: on absent (a
+# never-installed host, or a repeat absent run after packages were removed) AND on present under
+# --check (a dry-run on an unconverged host never really installed the units, so systemd_service
+# would error "Could not find the requested service"). Not needed on a real present run, where
+# install.yml ran first so the units exist.
+- name: Gather service facts so teardown and --check dry-runs skip missing units
+  ansible.builtin.service_facts:
+  when: himmelblau_state == "absent" or ansible_check_mode
+
+- name: Manage himmelblau services
+  ansible.builtin.systemd_service:
+    name: "{{ __service }}"
+    enabled: "{{ himmelblau_state == 'present' }}"
+    # present + start_services -> started; present + not start -> omit (enable only,
+    # activation can wait for a reachable tenant); absent -> stopped.
+    state: >-
+      {{ 'stopped' if himmelblau_state != 'present'
+         else ('started' if himmelblau_start_services | bool else omit) }}
+  loop: "{{ __himmelblau_services }}"
+  loop_control:
+    loop_var: __service
+  when:
+    # A real present run manages the units unconditionally (install.yml created them). On absent OR
+    # any --check run, only touch a unit that actually exists (service_facts, gathered above; keys
+    # carry the .service suffix) — so a dry-run on a fresh host, and teardown after package removal,
+    # are both clean no-ops instead of a "unit not found" failure.
+    - >-
+      (himmelblau_state == "present" and not ansible_check_mode)
+      or (__service ~ '.service') in (ansible_facts.services | default({}))

@@ -1,0 +1,31 @@
+---
+# tasks/ssh.yml — opt-in SSH server enrolment. Installs (present) or removes (absent)
+# the himmelblau sshd config so Entra users can authenticate over SSH. Upstream denies
+# SSH password-only by default (password_only_remote_services_deny_list); override via
+# himmelblau_extra_config if a host must allow it.
+
+# The Restart sshd handler uses state: restarted, which would START a stopped sshd. Gather service
+# state so the handler only restarts an already-running sshd — a himmelblau config change must never
+# bring up an sshd the operator deliberately left down. Restart, not reload: a running sshd will
+# not pick up the freshly-installed nss-himmelblau module on SIGHUP.
+- name: Gather service facts (only restart a running sshd)
+  ansible.builtin.service_facts:
+
+# Fail LOUDLY when SSH enrolment is explicitly enabled on an unsupported platform, like repo.yml and
+# pam.yml — otherwise an opted-in, security-relevant feature silently no-ops. Present
+# only: on absent there is nothing role-managed to remove, so teardown stays a no-op.
+- name: Fail when SSH enrolment is not implemented for this platform
+  ansible.builtin.fail:
+    msg: >-
+      SSH server enrolment is only implemented for SUSE (himmelblau-sshd-config).
+      Set himmelblau_configure_ssh=false and wire sshd yourself on this platform.
+  when:
+    - himmelblau_state == "present"
+    - ansible_facts['os_family'] != "Suse"
+
+- name: "Ensure the himmelblau sshd config package (SUSE) is {{ himmelblau_state }}"
+  ansible.builtin.package:
+    name: "{{ __himmelblau_sshd_package }}"
+    state: "{{ 'present' if himmelblau_state == 'present' else 'absent' }}"
+  when: ansible_facts['os_family'] == "Suse"
+  notify: Restart sshd

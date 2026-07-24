@@ -1,0 +1,40 @@
+---
+# Tuned deployment: home-directory layout, login shell, UID/GID mapping range,
+# and an opt-in offline break-glass window.
+#
+# Every value below is optional - unset variables fall back to the role or
+# upstream defaults. Adjust the idmap range only before the first users are
+# mapped; changing it later changes existing UIDs/GIDs.
+- name: Deploy Himmelblau with tuned identity and home-directory settings
+  hosts: workstations
+  become: true
+  vars:
+    himmelblau_domain: contoso.onmicrosoft.com
+    himmelblau_pam_allow_groups:
+      - f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12  # group allowed to log in
+    himmelblau_home_prefix: "/home/"
+    himmelblau_home_attr: uuid  # attribute naming the home dir (stable id)
+    himmelblau_home_alias: spn  # readable alias for the home dir (user@domain)
+    himmelblau_shell: /bin/bash
+    himmelblau_idmap_range: "200000-2000200000"
+    # Opt-in emergency offline window - keep the TTL small; a larger value
+    # widens the offline-authentication window.
+    himmelblau_offline_breakglass_enabled: true
+    himmelblau_offline_breakglass_ttl: 3600
+    # Point at an internal mirror of the network:idm repository:
+    # himmelblau_repo_url: "https://mirror.example.org/network:idm.repo"
+    # Pin package versions instead of the distro default list:
+    # himmelblau_packages:
+    #   - himmelblau-1.2.3
+    #   - nss-himmelblau-1.2.3
+    #   - pam-himmelblau-1.2.3
+    #   - himmelblau-sso-1.2.3
+    # Opt-in Intune MDM policy application (advanced). apply_policy has no dedicated
+    # variable - set it via the verbatim extra_config passthrough. It is a no-op until
+    # the device is Entra-joined (a first-login event this role does not orchestrate),
+    # requires an Intune-licensed tenant with assigned policies, and adds ~6 s of PAM
+    # login latency. Leave unset unless you need Intune policy applied:
+    # himmelblau_extra_config:
+    #   apply_policy: true
+  roles:
+    - role: ansible-himmelblau

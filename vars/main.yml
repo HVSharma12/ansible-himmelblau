@@ -1,0 +1,24 @@
+---
+# vars/main.yml — internal defaults shared across distros.
+# Distro-specific values are in vars/<distro>.yml and override these.
+
+__himmelblau_conf_path: /etc/himmelblau/himmelblau.conf
+__himmelblau_services:
+  - himmelblaud
+  - himmelblaud-tasks
+
+# NSS databases that gain the "himmelblau" source.
+__himmelblau_nss_databases:
+  - passwd
+  - group
+  - shadow
+
+# Generic fallbacks; expected to be overridden per distro.
+__himmelblau_packages:
+  - himmelblau
+  # capability name, not necessarily an rpm name — see vars/Suse.yml
+  - nss-himmelblau
+  - pam-himmelblau
+__himmelblau_repo_url: ""
+# How to wire PAM: "pam-config" (SUSE) or "manual".
+__himmelblau_pam_method: manual

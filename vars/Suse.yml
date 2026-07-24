@@ -1,0 +1,25 @@
+---
+# vars/Suse.yml — openSUSE Leap / Tumbleweed / SLE.
+# Selected when ansible_facts['os_family'] == "Suse".
+
+__himmelblau_packages:
+  - himmelblau
+  # virtual capability — the rpm is the soname-versioned libnss_himmelblau*; installing by the
+  # stable capability is correct, but never name-check it via package_facts.
+  - nss-himmelblau
+  - pam-himmelblau
+  - himmelblau-sso
+
+# network:idm repo. The version path matches the running SUSE release; Tumbleweed
+# uses "openSUSE_Tumbleweed". ansible_facts['distribution_version'] gives e.g. "15.6" / "16.0".
+__himmelblau_repo_url: >-
+  https://download.opensuse.org/repositories/network:/idm/{{
+  'openSUSE_Tumbleweed' if ansible_facts['distribution'] == 'openSUSE Tumbleweed'
+  else ansible_facts['distribution_version'] }}/network:idm.repo
+
+__himmelblau_pam_method: pam-config
+__himmelblau_sshd_package: himmelblau-sshd-config
+
+# zypper alias for the network:idm repo (the .repo file's [network_idm] section; colon->underscore).
+# Removes the repo by alias on teardown — the added baseurl differs from the .repo URL.
+__himmelblau_repo_alias: network_idm

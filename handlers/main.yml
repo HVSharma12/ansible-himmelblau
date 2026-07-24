@@ -1,0 +1,29 @@
+---
+# handlers/main.yml
+
+- name: Restart himmelblau
+  ansible.builtin.systemd_service:
+    name: "{{ __handler_service }}"
+    state: restarted
+  loop: "{{ __himmelblau_services }}"
+  loop_control:
+    loop_var: __handler_service
+  when:
+    - himmelblau_state == "present"
+    - himmelblau_start_services | bool
+
+# RESTART, not reload: installing nss-himmelblau adds a new NSS service module, and a running
+# sshd will NOT load it on a SIGHUP reload — it must be restarted, or sshd keeps rejecting Entra
+# users as "Invalid user" (getpwnam misses the new module). The SUSE SLE16 docs say the same:
+# create sshd_config.d/himmelblau.conf, then RESTART the SSH service. Restart is safe
+# for the running ansible connection: SUSE's sshd runs KillMode=process, so restarting the
+# listener leaves established sessions (including ours) alive — confirmed on a live VM.
+- name: Restart sshd
+  ansible.builtin.systemd_service:
+    name: sshd
+    state: restarted
+  when:
+    - himmelblau_start_services | bool
+    # restarted starts a stopped unit — only restart an sshd that is already running (ssh.yml
+    # gathers service_facts). If sshd is down/absent, the new module applies on its next start.
+    - (ansible_facts.services['sshd.service'].state | default('')) == 'running'

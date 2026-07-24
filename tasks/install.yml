@@ -1,0 +1,7 @@
+---
+# tasks/install.yml — install or remove Himmelblau packages.
+
+- name: "Ensure Himmelblau packages are {{ himmelblau_state }}"
+  ansible.builtin.package:
+    name: "{{ himmelblau_packages }}"
+    state: "{{ 'present' if himmelblau_state == 'present' else 'absent' }}"

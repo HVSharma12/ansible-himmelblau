@@ -1,0 +1,10 @@
+---
+# Full removal of Himmelblau: PAM and NSS wiring reverted, the configuration
+# and packages removed, and the network:idm repository deleted.
+- name: Remove Himmelblau completely
+  hosts: workstations
+  become: true
+  vars:
+    himmelblau_state: absent
+  roles:
+    - role: ansible-himmelblau

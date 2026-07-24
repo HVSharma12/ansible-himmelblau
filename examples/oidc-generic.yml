@@ -1,0 +1,21 @@
+---
+# Sovereign / non-Microsoft OIDC deployment (Keycloak, Authentik, Zitadel, ...).
+#
+# In generic mode both himmelblau_oidc_issuer_url and himmelblau_app_id are
+# required. The issuer URL must EXACTLY match the provider's advertised issuer
+# (including any path component) or provider discovery fails.
+# himmelblau_domain is not needed - the issuer URL is the identity anchor.
+- name: Deploy Himmelblau against a generic OIDC provider
+  hosts: servers
+  become: true
+  vars:
+    himmelblau_idp_provider: generic
+    himmelblau_oidc_issuer_url: https://id.example.org/realms/corp
+    himmelblau_app_id: 6b2f4d1c-9e3a-4c58-b7f0-1a2b3c4d5e6f  # OIDC client id
+    # Required unless the OIDC client allows refresh tokens and includes the
+    # offline_access scope; otherwise Hello PIN enrollment fails at login.
+    himmelblau_enable_hello: false
+    himmelblau_pam_allow_groups:
+      - 0d8f4c21-5a6e-4b3d-9c7f-2e1a8b9c0d3e  # group allowed to log in
+  roles:
+    - role: ansible-himmelblau

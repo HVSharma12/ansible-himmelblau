@@ -1,0 +1,35 @@
+---
+# Entra ID login with sudo mapping and SSH authentication enabled.
+#
+# himmelblau_configure_ssh: true alone is enough to let Entra ID users log in
+# over SSH: Himmelblau's default forces an MFA-capable flow (device code) and
+# keeps password-only SSH denied. That secure default is what this example
+# deploys.
+#
+# Caveats:
+# - Enabling himmelblau_configure_ssh RESTARTS sshd so it loads the new NSS
+#   module (a reload is not enough); the active SSH session survives.
+# - himmelblau_sudo_groups and himmelblau_local_sudo_group grant sudo AFTER a
+#   successful login - they do not scope who can log in. Only
+#   himmelblau_pam_allow_groups scopes login.
+- name: Deploy Himmelblau with sudo mapping and SSH login
+  hosts: servers
+  become: true
+  vars:
+    himmelblau_domain: contoso.onmicrosoft.com
+    himmelblau_pam_allow_groups:
+      - f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12  # group allowed to log in
+    himmelblau_sudo_groups:
+      - 9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d  # members get sudo after login
+    himmelblau_local_sudo_group: wheel
+    himmelblau_configure_ssh: true
+    # OPTIONAL security-weakening opt-in: allow password-only SSH for Entra ID
+    # users. Himmelblau denies password-only remote logins by default (its
+    # deny list includes ssh), which forces MFA-capable flows. Uncomment ONLY
+    # if this host must accept password-only SSH; it drops ssh from the deny
+    # list while keeping the other remote services protected.
+    # himmelblau_extra_config:
+    #   password_only_remote_services_deny_list: >-
+    #     telnet,ftp,rsh,rlogin,rexec,vnc,xrdp,cockpit,mosh
+  roles:
+    - role: ansible-himmelblau

@@ -1,0 +1,102 @@
+---
+# tasks/nss.yml — wire NSS resolution (present) or unwire it (absent), and manage
+# the conflicting nscd cache.
+
+- name: Check whether /etc/nsswitch.conf exists
+  ansible.builtin.stat:
+    path: /etc/nsswitch.conf
+  register: __himmelblau_nsswitch
+
+# SLE 16 ships nsswitch.conf as a vendor file under /usr/etc; /etc/nsswitch.conf is absent until
+# overridden. Check for the vendor copy so we can seed /etc from it — and fail with a clear message
+# (rather than a raw "Source not found" from copy) if neither exists.
+- name: Check whether the vendor /usr/etc/nsswitch.conf exists
+  ansible.builtin.stat:
+    path: /usr/etc/nsswitch.conf
+  register: __himmelblau_vendor_nsswitch
+  when:
+    - himmelblau_state == "present"
+    - not __himmelblau_nsswitch.stat.exists
+
+- name: Fail when no nsswitch.conf is available to wire NSS
+  ansible.builtin.fail:
+    msg: >-
+      No nsswitch.conf found at /etc or /usr/etc — cannot wire NSS resolution.
+      Provide /etc/nsswitch.conf or set himmelblau_configure_nss=false and wire NSS yourself.
+  when:
+    - himmelblau_state == "present"
+    - not __himmelblau_nsswitch.stat.exists
+    - not (__himmelblau_vendor_nsswitch.stat.exists | default(false))
+
+- name: Seed /etc/nsswitch.conf from the vendor copy when missing
+  ansible.builtin.copy:
+    src: /usr/etc/nsswitch.conf
+    dest: /etc/nsswitch.conf
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - himmelblau_state == "present"
+    - not __himmelblau_nsswitch.stat.exists
+    - __himmelblau_vendor_nsswitch.stat.exists | default(false)
+
+- name: Add himmelblau to NSS databases in nsswitch.conf
+  ansible.builtin.replace:
+    path: /etc/nsswitch.conf
+    # Append " himmelblau" only to lines that don't already contain it.
+    regexp: '^({{ __db }}:(?!.*\bhimmelblau\b).*)$'
+    replace: '\1 himmelblau'
+  loop: "{{ __himmelblau_nss_databases }}"
+  loop_control:
+    loop_var: __db
+  # The seed copy above does not write under --check, so on an unconverged host the file may not
+  # exist yet; skip rather than hard-fail when replace's target is missing in check mode.
+  when:
+    - himmelblau_state == "present"
+    - __himmelblau_nsswitch.stat.exists or not ansible_check_mode
+  notify: Restart himmelblau
+
+- name: Remove himmelblau from NSS databases in nsswitch.conf
+  ansible.builtin.replace:
+    path: /etc/nsswitch.conf
+    # Strip the " himmelblau" token we appended (no-op once it is gone).
+    regexp: '^({{ __db }}:.*?)\s+himmelblau\b(.*)$'
+    replace: '\1\2'
+  loop: "{{ __himmelblau_nss_databases }}"
+  loop_control:
+    loop_var: __db
+  when:
+    - himmelblau_state == "absent"
+    - __himmelblau_nsswitch.stat.exists
+
+# nscd conflicts with the himmelblau NSS module. Instead of a blanket failed_when:false that hides
+# every systemd error, tolerate ONLY one benign case: nscd
+# is not installed ("Could not find the requested service"). service_facts existence-gating is NOT
+# reliable here — service_facts lists nscd.service as a phantom entry (other units reference it via
+# Conflicts=/After=) even when the unit file does not exist, so systemd_service still errors. A
+# narrow, single-message failed_when surfaces real errors (dbus, read-only /etc) while ignoring the
+# not-installed case.
+- name: Mask and stop nscd (conflicts with the himmelblau NSS module)
+  ansible.builtin.systemd_service:
+    name: nscd
+    masked: true
+    # Stop a running nscd too — masking alone does not stop an already-running instance.
+    state: stopped
+  register: __himmelblau_nscd_mask
+  failed_when:
+    - __himmelblau_nscd_mask is failed
+    - "'Could not find the requested service' not in (__himmelblau_nscd_mask.msg | default(''))"
+  when: himmelblau_state == "present"
+
+# Teardown unmasks nscd (reversing the mask); it does not re-enable/start it — restoring an nscd the
+# role never started is out of scope, and leaving it unmasked-but-inactive is the safe default.
+- name: Unmask nscd
+  ansible.builtin.systemd_service:
+    name: nscd
+    masked: false
+  register: __himmelblau_nscd_unmask
+  failed_when:
+    - __himmelblau_nscd_unmask is failed
+    - "'Could not find the requested service' not in (__himmelblau_nscd_unmask.msg | default(''))"
+  when: himmelblau_state == "absent"

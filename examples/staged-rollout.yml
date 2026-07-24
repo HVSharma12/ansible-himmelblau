@@ -1,0 +1,26 @@
+---
+# Phase 1 of a staged rollout: stage Himmelblau before the hosts have tenant
+# connectivity.
+#
+# Phase 1 (this playbook): install the packages and render
+# /etc/himmelblau/himmelblau.conf. The daemons are enabled but NOT started
+# (they will start on the next boot), and PAM/NSS are untouched, so host login
+# behaviour is unchanged - and because PAM is not configured, the
+# login-scoping guard is not triggered.
+#
+# Phase 2 (when the tenant is reachable): re-run the role with the defaults
+# restored (himmelblau_start_services, himmelblau_configure_pam and
+# himmelblau_configure_nss all back to true) plus himmelblau_pam_allow_groups
+# to wire NSS/PAM and start the daemons.
+- name: Stage Himmelblau without activating it (phase 1)
+  hosts: servers
+  become: true
+  vars:
+    himmelblau_domain: contoso.onmicrosoft.com
+    himmelblau_start_services: false
+    himmelblau_configure_pam: false
+    himmelblau_configure_nss: false
+    # Skip repository setup when packages come from an internal mirror:
+    # himmelblau_manage_repo: false
+  roles:
+    - role: ansible-himmelblau
