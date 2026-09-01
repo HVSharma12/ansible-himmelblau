@@ -19,6 +19,5 @@ __himmelblau_packages:
   # capability name, not necessarily an rpm name — see vars/Suse.yml
   - nss-himmelblau
   - pam-himmelblau
-__himmelblau_repo_url: ""
 # How to wire PAM: "pam-config" (SUSE) or "manual".
 __himmelblau_pam_method: manual

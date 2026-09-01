@@ -3,9 +3,8 @@
 Deploy and configure [Himmelblau](https://himmelblau-idm.org/) for Microsoft Entra ID
 authentication and identity on Linux.
 
-The role adds the package repository, installs the Himmelblau packages, renders
-`/etc/himmelblau/himmelblau.conf`, wires NSS and PAM, masks `nscd`, and enables the
-`himmelblaud` / `himmelblaud-tasks` daemons.
+The role installs the Himmelblau packages, renders `/etc/himmelblau/himmelblau.conf`,
+wires NSS and PAM, masks `nscd`, and enables the `himmelblaud` / `himmelblaud-tasks` daemons.
 
 > ⚠️ **Lock-out risk.** This role modifies the PAM stack. Test against a VM with an
 > independent root rescue session before running it on any host you cannot physically recover.
@@ -16,11 +15,9 @@ The role targets SUSE distributions first.
 
 | Platform | Support status |
 |---|---|
-| SLE 16 | **Supported** — every change is integration-tested on SLE 16. |
-| openSUSE Leap 16.0 | **Verified** — validated end to end; not part of continuous testing. |
-| SLE 15, openSUSE Tumbleweed | **Experimental** — distribution support is present but not yet validated. |
+| SLE 16.1 | **Supported** — every change is integration-tested on SLE 16.1. |
 
-Other distributions are not supported; the role fails with a clear error if repository, PAM, or
+Other distributions are not supported; the role fails with a clear error if PAM or
 SSH management is enabled on them.
 
 ## Requirements
@@ -31,8 +28,10 @@ SSH management is enabled on them.
 - An Entra ID tenant **or** a standards-compliant OIDC issuer. `domain` is optional (Entra infers it
   from the first user's UPN); generic OIDC requires `himmelblau_oidc_issuer_url` **and**
   `himmelblau_app_id`. See [Generic OIDC](#generic-oidc).
+- Managed hosts registered with the SUSE Customer Center or an RMT/SMT mirror — the Himmelblau
+  packages come from the SLE 16.1 base product; the role adds no repository.
 - Network egress from the managed hosts to `login.microsoftonline.com` (Entra authentication) and
-  `download.opensuse.org` (the `network:idm` package repository).
+  the SUSE update servers (or your RMT/SMT mirror).
 
 ## Quick start
 
@@ -86,8 +85,7 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 | `himmelblau_logon_token_app_id` | `""` | Separate app (client) ID for logon-token scopes. Rendered only when set. |
 | `himmelblau_user_map_file` | `""` | Path to an external name-mapping file (the role writes the key only, not the file). Rendered only when set. |
 | `himmelblau_extra_config` | `{}` | Extra `[global]` keys merged verbatim. Typed vars above win over the same key here. |
-| `himmelblau_state` | `present` | `present` to deploy; `absent` to fully tear down — revert PAM/NSS, remove the config, uninstall the packages, and remove the `network:idm` repo (no orphaned references left behind). |
-| `himmelblau_manage_repo` | `true` | Add the `network:idm` package repository on `present`. On `absent` the repo is removed regardless of this toggle (teardown-flag-independent). |
+| `himmelblau_state` | `present` | `present` to deploy; `absent` to fully tear down — revert PAM/NSS, remove the config, and uninstall the packages (no orphaned references left behind). |
 | `himmelblau_configure_nss` | `true` | Wire `/etc/nsswitch.conf` and mask `nscd`. |
 | `himmelblau_configure_pam` | `true` | Configure the PAM stack (via `pam-config` on SUSE). |
 | `himmelblau_pam_allow_no_groups` | `false` | Permit wiring PAM with no allow-group restriction (allow-all login). Leave `false` to require `himmelblau_pam_allow_groups` scoping; set `true` only to consciously accept allow-all login (admin groups do **not** satisfy the guard) — see [Before you enable PAM](#before-you-enable-pam). |
@@ -98,7 +96,6 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 | `himmelblau_offline_breakglass_enabled` | `false` | Opt-in emergency offline MFA bypass; renders an `[offline_breakglass]` section when `true`. |
 | `himmelblau_offline_breakglass_ttl` | `7200` | Offline break-glass TTL in seconds (used when enabled). A larger value widens the offline-authentication window — keep it as small as recovery needs allow. |
 | `himmelblau_packages` | distro list | Override to pin/customize the installed packages. |
-| `himmelblau_repo_url` | distro URL | Override the repository `.repo` URL. |
 
 ## Before you enable PAM
 
@@ -177,7 +174,7 @@ playbooks live in [`examples/`](examples/):
 | [`advanced-config.yml`](examples/advanced-config.yml) | Home-directory layout, login shell, idmap range, offline break-glass, repository/package overrides, and the opt-in Intune `apply_policy` passthrough. |
 | [`staged-rollout.yml`](examples/staged-rollout.yml) | Stage packages and config without starting the daemons or touching PAM/NSS, for phased activation. |
 | [`allow-all-login.yml`](examples/allow-all-login.yml) | Explicit allow-all login opt-in via `himmelblau_pam_allow_no_groups: true`. |
-| [`teardown.yml`](examples/teardown.yml) | `himmelblau_state: absent` — reverts PAM/NSS wiring, removes the config, uninstalls the packages, removes the `network:idm` repository. |
+| [`teardown.yml`](examples/teardown.yml) | `himmelblau_state: absent` — reverts PAM/NSS wiring, removes the config, uninstalls the packages. |
 
 ## Idempotency and check mode
 
@@ -188,12 +185,8 @@ changes restart the `himmelblaud` / `himmelblaud-tasks` daemons via handlers.
 ## Removing Himmelblau
 
 Set `himmelblau_state: absent` to tear the deployment down completely: the role reverts the PAM and
-NSS wiring, removes `/etc/himmelblau/himmelblau.conf`, uninstalls the Himmelblau packages, and
-removes the `network:idm` package repository. See
+NSS wiring, removes `/etc/himmelblau/himmelblau.conf`, and uninstalls the Himmelblau packages. See
 [`examples/teardown.yml`](examples/teardown.yml).
-
-Note: on `absent`, the repository is removed regardless of the `himmelblau_manage_repo` setting —
-teardown leaves no orphaned repository references behind.
 
 ## License
 

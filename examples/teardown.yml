@@ -1,6 +1,6 @@
 ---
 # Full removal of Himmelblau: PAM and NSS wiring reverted, the configuration
-# and packages removed, and the network:idm repository deleted.
+# and packages removed.
 - name: Remove Himmelblau completely
   hosts: workstations
   become: true

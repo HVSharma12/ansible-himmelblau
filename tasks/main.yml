@@ -75,7 +75,7 @@
 # Pre-flight login-scoping guard: only pam_allow_groups scopes who can log in (unset =
 # allow-all). Admin groups (local_groups/sudo_groups) are post-login membership/sudo and do NOT
 # scope login. Refuse to wire PAM with unscoped login unless allow-all is explicitly accepted —
-# run here, before repo/install/NSS, so a misconfig aborts with no partial state.
+# run here, before install/NSS, so a misconfig aborts with no partial state.
 - name: Refuse to wire PAM with unscoped login
   ansible.builtin.assert:
     that:
@@ -99,15 +99,8 @@
     # accepted deliberately.
     - __himmelblau_pam_method == "pam-config"
 
-# Add the repo on present (when managed); remove it on absent regardless of the manage_repo toggle —
-# teardown-flag-independent, so a host that had the repo added is cleanly cleared even if the toggle
-# has since drifted to false — the removal is a no-op if it was never added.
-- name: Manage the package repository (add on present, remove on absent)
-  ansible.builtin.include_tasks: repo.yml
-  when: >-
-    (himmelblau_state == "present" and himmelblau_manage_repo | bool)
-    or himmelblau_state == "absent"
-
+# The packages ship in the SLE 16.1 base product, so a registered host already resolves them —
+# there is no repository for the role to manage.
 - name: Install packages
   ansible.builtin.include_tasks: install.yml
   when: himmelblau_state == "present"

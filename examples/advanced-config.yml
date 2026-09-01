@@ -21,8 +21,6 @@
     # widens the offline-authentication window.
     himmelblau_offline_breakglass_enabled: true
     himmelblau_offline_breakglass_ttl: 3600
-    # Point at an internal mirror of the network:idm repository:
-    # himmelblau_repo_url: "https://mirror.example.org/network:idm.repo"
     # Pin package versions instead of the distro default list:
     # himmelblau_packages:
     #   - himmelblau-1.2.3

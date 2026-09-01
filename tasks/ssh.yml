@@ -11,7 +11,7 @@
 - name: Gather service facts (only restart a running sshd)
   ansible.builtin.service_facts:
 
-# Fail LOUDLY when SSH enrolment is explicitly enabled on an unsupported platform, like repo.yml and
+# Fail LOUDLY when SSH enrolment is explicitly enabled on an unsupported platform, like
 # pam.yml — otherwise an opted-in, security-relevant feature silently no-ops. Present
 # only: on absent there is nothing role-managed to remove, so teardown stays a no-op.
 - name: Fail when SSH enrolment is not implemented for this platform

@@ -20,7 +20,5 @@
     himmelblau_start_services: false
     himmelblau_configure_pam: false
     himmelblau_configure_nss: false
-    # Skip repository setup when packages come from an internal mirror:
-    # himmelblau_manage_repo: false
   roles:
     - role: ansible-himmelblau
