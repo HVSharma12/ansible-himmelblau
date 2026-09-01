@@ -58,6 +58,15 @@ himmelblau_extra_config: {}
 # present|absent — install/configure, or remove the role's managed state.
 himmelblau_state: present
 
+# Transactional-update systems only (SLE 16.1 Immutable / SL Micro): package changes are staged
+# into a new snapshot and need a reboot to become live. true = the role reboots the host when a
+# package transaction was staged; false = notify only, the operator reboots later — note the
+# NSS/PAM wiring of the SAME run then acts on not-yet-live packages and fails at pam-config, so
+# pair false with configure_nss/pam: false (staged rollout) and re-run after the reboot; unset
+# (null, the default) = fail so the reboot requirement is a conscious decision. Ignored on
+# non-transactional systems.
+himmelblau_transactional_update_reboot_ok: null
+
 # Configure NSS (/etc/nsswitch.conf) for himmelblau resolution.
 himmelblau_configure_nss: true
 

@@ -5,3 +5,6 @@
   ansible.builtin.package:
     name: "{{ himmelblau_packages }}"
     state: "{{ 'present' if himmelblau_state == 'present' else 'absent' }}"
+  # On a transactional host a changed result means the transaction was STAGED into a new
+  # snapshot, not applied — main.yml keys the reboot contract on this register.
+  register: __himmelblau_package_result

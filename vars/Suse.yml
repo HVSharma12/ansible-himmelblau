@@ -1,5 +1,7 @@
 ---
-# vars/Suse.yml — openSUSE Leap / Tumbleweed / SLE.
+# vars/Suse.yml — the Suse os_family (SLE 16.1 and its SL-Micro/Immutable variant are the
+# supported targets; the family-wide match also serves `absent` teardown of hosts wired by
+# older releases, which the platform guard deliberately exempts).
 # Selected when ansible_facts['os_family'] == "Suse".
 
 __himmelblau_packages:

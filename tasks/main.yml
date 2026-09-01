@@ -30,6 +30,21 @@
         - "{{ role_path }}/vars"
       skip: true
 
+# Transactional hosts (SLE 16.1 Immutable / SL Micro) stage package changes into a new snapshot
+# that only becomes live after a reboot. Detection follows the LSR pattern and is guarded so
+# tests can inject the flag.
+- name: Determine if system is transactional update and set flag
+  when: not __himmelblau_is_transactional is defined
+  block:
+    - name: Check if transactional-update exists in /sbin
+      ansible.builtin.stat:
+        path: /sbin/transactional-update
+      register: __himmelblau_transactional_update_stat
+
+    - name: Set flag if transactional-update exists
+      ansible.builtin.set_fact:
+        __himmelblau_is_transactional: "{{ __himmelblau_transactional_update_stat.stat.exists }}"
+
 - name: Validate himmelblau_state
   ansible.builtin.assert:
     that:
@@ -38,6 +53,27 @@
       himmelblau_state must be 'present' or 'absent' (got '{{ himmelblau_state }}'). A typo would
       otherwise drive a silent partial teardown (install/configure skip, services stop).
     quiet: true
+
+# Supported-platform guard. The role installs from the SLE 16.1 base product, so an older release
+# has no source for the packages at all. os_family alone is NOT enough: SLE 15.x, SLE 16.0, Leap
+# and Tumbleweed are all "Suse", pass every other assert, and would otherwise reach install.yml
+# and die on the package manager's own error. "SL-Micro" is how Ansible reports the SLE 16.1
+# Immutable (transactional) variant — supported under the transactional reboot contract, so it is
+# admitted here. Present-only, so teardown of a host wired by an older release still works.
+- name: Assert the target is a supported platform (SLE 16.1 or later)
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] in ["SLES", "SL-Micro"]
+      - ansible_facts['distribution_version'] is version('16.1', '>=')
+    fail_msg: >-
+      This role supports SLE 16.1 and later only — it installs Himmelblau from the SLE 16.1 base
+      product and adds no repository. This host is
+      {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+      For SLE 15.x / SLE 16.0 / openSUSE, use the v1.x series, which manages the network:idm
+      repository. Registration with the SUSE Customer Center (or an RMT/SMT mirror) is also
+      required — without it the packages will not resolve.
+    quiet: true
+  when: himmelblau_state == "present"
 
 - name: Validate the IdP provider and its required keys
   ansible.builtin.assert:
@@ -105,6 +141,17 @@
   ansible.builtin.include_tasks: install.yml
   when: himmelblau_state == "present"
 
+# The staged transaction must be live before configure/NSS/PAM run — pam-config reads profile
+# files the packages provide, and on a transactional host they exist only in the new snapshot
+# until the reboot.
+- name: Handle reboot for transactional update systems (package install)
+  ansible.builtin.include_tasks: transactional_reboot.yml
+  when:
+    - himmelblau_state == "present"
+    - __himmelblau_is_transactional | d(false)
+    - __himmelblau_package_result is defined
+    - __himmelblau_package_result is changed
+
 - name: Configure himmelblau (render on present, remove on absent)
   ansible.builtin.include_tasks: configure.yml
 
@@ -129,3 +176,16 @@
 - name: Remove packages (after services stopped and PAM/NSS/config reverted)
   ansible.builtin.include_tasks: install.yml
   when: himmelblau_state == "absent"
+
+# On absent the staged removal (main set and/or the sshd-config package from ssh.yml) is also not
+# live until reboot. PAM/NSS were already unwired live above, so login safety does not depend on
+# this — the reboot just makes the package removal effective.
+- name: Handle reboot for transactional update systems (package removal)
+  ansible.builtin.include_tasks: transactional_reboot.yml
+  when:
+    - himmelblau_state == "absent"
+    - __himmelblau_is_transactional | d(false)
+    - >-
+      (__himmelblau_package_result is defined and __himmelblau_package_result is changed)
+      or (__himmelblau_sshd_package_result is defined
+          and __himmelblau_sshd_package_result is changed)

@@ -29,3 +29,14 @@
     state: "{{ 'present' if himmelblau_state == 'present' else 'absent' }}"
   when: ansible_facts['os_family'] == "Suse"
   notify: Restart sshd
+  register: __himmelblau_sshd_package_result
+
+# Present only: the staged sshd-config package must be live before the Restart sshd handler fires
+# at play end. On absent the staged removal is folded into the end-of-teardown reboot in main.yml
+# instead of rebooting mid-teardown.
+- name: Handle reboot for transactional update systems (sshd config package)
+  ansible.builtin.include_tasks: transactional_reboot.yml
+  when:
+    - himmelblau_state == "present"
+    - __himmelblau_is_transactional | d(false)
+    - __himmelblau_sshd_package_result is changed

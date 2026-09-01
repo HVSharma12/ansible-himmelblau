@@ -13,13 +13,17 @@
   when: himmelblau_state == "present"
 
 # Gather known services whenever we must skip units that may not exist yet: on absent (a
-# never-installed host, or a repeat absent run after packages were removed) AND on present under
+# never-installed host, or a repeat absent run after packages were removed), on present under
 # --check (a dry-run on an unconverged host never really installed the units, so systemd_service
-# would error "Could not find the requested service"). Not needed on a real present run, where
-# install.yml ran first so the units exist.
-- name: Gather service facts so teardown and --check dry-runs skip missing units
+# would error "Could not find the requested service"), AND on any transactional host: with a
+# deferred reboot (reboot_ok=false) a staged install's unit files exist only in the new snapshot,
+# so the live systemd cannot see them yet. Not needed on a plain present run, where install.yml
+# ran first so the units exist.
+- name: Gather service facts so teardown, --check, and transactional runs skip missing units
   ansible.builtin.service_facts:
-  when: himmelblau_state == "absent" or ansible_check_mode
+  when: >-
+    himmelblau_state == "absent" or ansible_check_mode
+    or __himmelblau_is_transactional | d(false)
 
 - name: Manage himmelblau services
   ansible.builtin.systemd_service:
@@ -34,10 +38,14 @@
   loop_control:
     loop_var: __service
   when:
-    # A real present run manages the units unconditionally (install.yml created them). On absent OR
-    # any --check run, only touch a unit that actually exists (service_facts, gathered above; keys
-    # carry the .service suffix) — so a dry-run on a fresh host, and teardown after package removal,
-    # are both clean no-ops instead of a "unit not found" failure.
+    # A plain present run manages the units unconditionally (install.yml created them). On absent,
+    # any --check run, OR a transactional host, only touch a unit that actually exists
+    # (service_facts, gathered above; keys carry the .service suffix) — so a dry-run on a fresh
+    # host, teardown after package removal, and a transactional deferred-reboot run (units still
+    # only in the staged snapshot; the reboot-required notify already told the operator) are all
+    # clean no-ops instead of a "unit not found" failure. After a reboot_ok=true reboot the units
+    # are live, service_facts sees them, and they are managed normally.
     - >-
-      (himmelblau_state == "present" and not ansible_check_mode)
+      (himmelblau_state == "present" and not ansible_check_mode
+       and not __himmelblau_is_transactional | d(false))
       or (__service ~ '.service') in (ansible_facts.services | default({}))

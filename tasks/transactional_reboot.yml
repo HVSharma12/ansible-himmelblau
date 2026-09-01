@@ -1,0 +1,31 @@
+---
+# tasks/transactional_reboot.yml — the LSR transactional-update reboot contract.
+# Included only when the host is transactional AND a package transaction was staged: the change
+# lives in a new snapshot and is not live until reboot. Kept verbatim in shape and wording from
+# the upstream LSR pattern (firewall/timesync). On this role the placement is load-bearing, not
+# stylistic: pam-config reads profile files the staged packages only provide after the reboot,
+# so on the present path this runs between install and the NSS/PAM wiring.
+
+- name: Notify user that reboot is needed to apply changes
+  ansible.builtin.debug:
+    msg: >
+      Reboot required to apply changes due to transactional updates.
+
+# Deliberate one-line deviation from the LSR-verbatim `reboot_ok | bool`: piping the null default
+# through `| bool` is a deprecated coercion that becomes a hard error on ansible-core 2.23, which
+# would replace the designed contract failure below with a templating error. The null-guard
+# evaluates first, so null cleanly falls through to the fail task.
+- name: Reboot transactional update systems
+  ansible.builtin.reboot:
+    msg: Rebooting the system to apply transactional update changes.
+  when:
+    - himmelblau_transactional_update_reboot_ok is not none
+    - himmelblau_transactional_update_reboot_ok | bool
+
+- name: Fail if reboot is needed and not set
+  ansible.builtin.fail:
+    msg: >
+      Reboot is required but not allowed. Please set
+      'himmelblau_transactional_update_reboot_ok' to proceed.
+  when:
+    - himmelblau_transactional_update_reboot_ok is none

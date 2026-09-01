@@ -16,9 +16,29 @@ The role targets SUSE distributions first.
 | Platform | Support status |
 |---|---|
 | SLE 16.1 | **Supported** — every change is integration-tested on SLE 16.1. |
+| SLE 16.1 Immutable (transactional) | **Supported** — package changes stage into a new snapshot and need a reboot; the role follows the Linux System Roles reboot contract via `himmelblau_transactional_update_reboot_ok`. |
 
 Other distributions are not supported; the role fails with a clear error if PAM or
 SSH management is enabled on them.
+
+## Transactional systems (SLE 16.1 Immutable)
+
+On the Immutable variant the root filesystem is read-only: a package transaction is staged into a
+new snapshot and only becomes live after a reboot. The role detects such systems by itself (the
+presence of `transactional-update`) and applies the reboot contract used across Linux System
+Roles, controlled by `himmelblau_transactional_update_reboot_ok`:
+
+- `true` — after staging a package change the role reboots the host, waits for it to return, and
+  continues: NSS/PAM wiring then runs against the live packages. One converge deploys end to end.
+- `false` — the role notifies that a reboot is required and continues without one. Units that are
+  not live yet are skipped rather than failed, but PAM/NSS wiring in the same run would still act
+  on not-yet-live packages — so pair this with `himmelblau_configure_nss: false` and
+  `himmelblau_configure_pam: false`, reboot at your convenience, then re-run the role with the
+  toggles on to finish the deployment.
+- unset (the default) — the role **fails** when a reboot would be required, so the decision is
+  never made implicitly.
+
+On non-transactional systems the variable is ignored and the role never reboots anything.
 
 ## Requirements
 
@@ -86,6 +106,7 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 | `himmelblau_user_map_file` | `""` | Path to an external name-mapping file (the role writes the key only, not the file). Rendered only when set. |
 | `himmelblau_extra_config` | `{}` | Extra `[global]` keys merged verbatim. Typed vars above win over the same key here. |
 | `himmelblau_state` | `present` | `present` to deploy; `absent` to fully tear down — revert PAM/NSS, remove the config, and uninstall the packages (no orphaned references left behind). |
+| `himmelblau_transactional_update_reboot_ok` | `null` | Transactional-update systems (SLE 16.1 Immutable) only. When a staged package change requires a reboot: `true` — the role reboots to apply it; `false` — the role notifies and continues, allowing custom handling (note: PAM/NSS wiring in the *same* run needs the packages live, so pair with `configure_nss/pam: false` and re-run after your reboot); unset — the role **fails**, ensuring the reboot requirement is not overlooked. Ignored on non-transactional systems. See [Transactional systems (SLE 16.1 Immutable)](#transactional-systems-sle-161-immutable). |
 | `himmelblau_configure_nss` | `true` | Wire `/etc/nsswitch.conf` and mask `nscd`. |
 | `himmelblau_configure_pam` | `true` | Configure the PAM stack (via `pam-config` on SUSE). |
 | `himmelblau_pam_allow_no_groups` | `false` | Permit wiring PAM with no allow-group restriction (allow-all login). Leave `false` to require `himmelblau_pam_allow_groups` scoping; set `true` only to consciously accept allow-all login (admin groups do **not** satisfy the guard) — see [Before you enable PAM](#before-you-enable-pam). |
@@ -182,11 +203,18 @@ A second run of the role against an already-converged host reports zero changes.
 check-mode safe (`ansible-playbook --check` previews without modifying the host). Configuration
 changes restart the `himmelblaud` / `himmelblaud-tasks` daemons via handlers.
 
+On transactional systems the zero-changed guarantee holds once the reboot that applies the staged
+transaction has happened: `himmelblau_transactional_update_reboot_ok: true` reaches that state in a
+single run, while with `false` the package task keeps reporting changed (and re-notifying) until
+the operator reboots — see [Transactional systems (SLE 16.1 Immutable)](#transactional-systems-sle-161-immutable).
+
 ## Removing Himmelblau
 
 Set `himmelblau_state: absent` to tear the deployment down completely: the role reverts the PAM and
 NSS wiring, removes `/etc/himmelblau/himmelblau.conf`, and uninstalls the Himmelblau packages. See
-[`examples/teardown.yml`](examples/teardown.yml).
+[`examples/teardown.yml`](examples/teardown.yml). A `network:idm` repository added by the v1.x
+series is not removed (this role manages no repositories) — unwind that with the v1.x teardown or
+remove it yourself.
 
 ## License
 
