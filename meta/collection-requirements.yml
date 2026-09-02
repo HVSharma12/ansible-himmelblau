@@ -1,0 +1,7 @@
+---
+# Collections the role depends on at runtime / for tests.
+collections:
+  # Provides the zypper package path and community.general.pamd. On transactional systems
+  # (SLE 16.1 Immutable) the install correctness depends on the zypper module staging the
+  # transaction on a read-only root — verified with community.general 13.x.
+  - name: community.general
