@@ -1,0 +1,33 @@
+---
+name: Ansible Lint
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 2 1 * *"
+  workflow_dispatch:
+
+jobs:
+  ansible_lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: |
+          pip3 install ansible==11.3.0
+          pip3 install ansible-core==2.18.3
+          pip3 install ansible-lint==26.1.1
+
+      - name: Run ansible-lint
+        working-directory: ${{ github.workspace }}
+        run: |
+          ansible-lint -v

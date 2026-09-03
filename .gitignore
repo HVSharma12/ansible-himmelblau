@@ -1,0 +1,34 @@
+.tox/
+*.retry
+__pycache__/
+*.pyc
+.refs/snapshot-*/
+*.qcow2
+.ansible/
+
+# Private, machine-local owner docs (requirements, goals, notes) — never committed,
+# but Claude still auto-loads them locally. Convention: anything *.local.md or under .local/.
+*.local.md
+.local/
+
+# Live-tenant vault: the live playbooks and their .vault.yml.example templates live on the
+# maintainers' bench, but keep this belt-and-braces pair — a filled-in vault must
+# never be committed anywhere. The .example suffix stays safe (not matched by *.vault.yml).
+*.vault.yml
+!*.vault.yml.example
+
+# Generated CI output (transient, per-commit). CI results live on the maintainers'
+# bench; keep CI-RESULTS.md/.ci-logs/ as belt-and-braces so a stale,
+# previously-generated artifact can never be swept into the shipped tree.
+CI-RESULTS.md
+.ci-logs/
+artifacts/
+artifacts.snap/
+
+# SUSEConnect regcodes / registration secrets — never commit (dereg needs no regcode)
+*regcode*
+**/reg
+linux-system-roles.json
+
+# Editor state
+.vscode/

@@ -1,5 +1,7 @@
 # ansible-himmelblau
 
+![Ansible Lint](https://github.com/SUSE/ansible-himmelblau/actions/workflows/ansible-lint.yml/badge.svg?branch=main)
+
 Deploy and configure [Himmelblau](https://himmelblau-idm.org/) for Microsoft Entra ID
 authentication and identity on Linux.
 
@@ -222,4 +224,6 @@ MIT
 
 ## Author information
 
-Maintained by Harshvardhan Sharma
+Maintained by SUSE (Harshvardhan Sharma, <harshvardhan.sharma@suse.com>) and the
+ansible-himmelblau role authors.
+Himmelblau upstream: <https://github.com/himmelblau-idm/himmelblau>.

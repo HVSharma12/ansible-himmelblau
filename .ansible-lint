@@ -1,0 +1,13 @@
+---
+profile: production
+
+exclude_paths:
+  - .refs/
+  - .tox/
+  - .github/
+  - examples/   # example inventories reference hosts that don't exist here
+
+# Role is consumed as "ansible-himmelblau"; allow that directory name.
+kinds:
+  - playbook: "tests/tests_*.yml"
+  - playbook: "examples/*.yml"
