@@ -29,28 +29,44 @@
         - __himmelblau_pam_query.stdout | trim | length > 0
       changed_when: true
 
-    # WORKAROUND: pam-config < 2.14 hardcodes
-    # the himmelblau account line as `account required pam_himmelblau.so` — a deliberate built-in;
-    # it never reads the plugin file (/usr/lib/pam-config.d/himmelblau.conf) that declares
-    # `sufficient`. With `required`, the next line `account required pam_unix.so` returns
-    # AUTHINFO_UNAVAIL for an Entra user (no /etc/shadow entry) and the whole account phase
-    # fails — so NO Entra user can log in (login/su/sshd all die there; proven live 2026-07-07).
-    # We restore the control the upstream plugin declares. Safe: himmelblau's acct_mgmt itself
-    # enforces pam_allow_groups — out-of-group → PAM_AUTH_ERR, so `sufficient` does not let them
-    # through; source-verified. On SLE16 common-account is a symlink to
-    # common-account-pc, so this lands in the pam-config-owned file and is re-applied every
-    # converge (an external pam-config run reverts it). Fixed upstream twice — pam-config >= 2.14
-    # emits the declared `sufficient`, and himmelblau >= 3.1.8 serves NSS synthetic shadow
-    # entries — so this task self-disables on fixed hosts: pamd only matches a `required`
-    # himmelblau account line (also what keeps it idempotent). On absent, pam-config --delete
-    # removes the line, so there is nothing to revert.
-    - name: Enforce the plugin-declared 'sufficient' account control (pam-config < 2.14)
+    # ACCOUNT CONTROL. pam-config < 2.14
+    # hardcodes `account required pam_himmelblau.so ignore_unknown_user`; upstream declares
+    # `[success=ok auth_err=die default=ignore]` for that line and himmelblau >= 3.1.12 rewrites
+    # `required`/`sufficient` to it on package upgrade, so the role writes the same control.
+    # Semantics, per the module's own return codes:
+    #   - out-of-group Entra user  -> PAM_AUTH_ERR -> die: denied, terminally (scoping holds);
+    #   - in-group Entra user      -> PAM_SUCCESS  -> ok: continues to pam_unix, which succeeds on
+    #     the NSS synthetic shadow entry himmelblau >= 3.1.8 serves (SLE 16.1 ships 3.1.11);
+    #   - local user / daemon down -> PAM_IGNORE   -> ignore: pam_unix decides, as before — the
+    #     lock-out invariant is unchanged.
+    # Matches `required` (pam-config's output) AND `sufficient` (a host converged by v1.x, where
+    # synthetic shadow entries turned `sufficient` into a login-scoping bypass), so re-converging
+    # repairs both. The `[success=end …]` item is the plugin file's own 3.1.11 wording (upstream
+    # changed `end` to `ok` in 3.1.12): a pam-config >= 2.14 that honoured the plugin file while
+    # himmelblau was still < 3.1.12 would emit `end`, which is not a control action pamd or
+    # Linux-PAM accepts — pamd validates the WHOLE file on every call, so an unmatched `end` line
+    # would hard-fail this task instead of being repaired. It is listed FIRST because pamd
+    # validates after the rewrite, so it must be corrected before a later item re-reads the file.
+    # Idempotent: once the line carries the target control none of the three patterns match. On
+    # SLE16 common-account is a symlink to common-account-pc, so this lands in the pam-config-owned
+    # file and is re-applied every converge (an external pam-config run regenerates `required` —
+    # still safe — until the next converge). On absent, pam-config --delete removes the line, so
+    # there is nothing to revert. Note: a check-mode run on a not-yet-wired host reports this task
+    # ok (the pam-config --add above is skipped, so there is no himmelblau line to match) — that ok
+    # does not mean the host is already converged.
+    - name: Set the himmelblau account line to the upstream-declared control
       community.general.pamd:
         name: common-account
         type: account
-        control: required
+        control: "{{ __himmelblau_legacy_control }}"
         module_path: pam_himmelblau.so
-        new_control: sufficient
+        new_control: "[success=ok auth_err=die default=ignore]"
+      loop:
+        - "[success=end auth_err=die default=ignore]"
+        - required
+        - sufficient
+      loop_control:
+        loop_var: __himmelblau_legacy_control
       when: himmelblau_state == "present"
 
 - name: Fail when PAM wiring is not implemented for this platform
