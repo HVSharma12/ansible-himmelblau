@@ -31,7 +31,7 @@ logon_token_app_id = {{ himmelblau_logon_token_app_id }}
 {% if himmelblau_user_map_file | length > 0 %}
 user_map_file = {{ himmelblau_user_map_file }}
 {% endif %}
-{% if himmelblau_idp_provider == 'generic' and himmelblau_oidc_issuer_url | length > 0 %}
+{% if himmelblau_oidc_issuer_url | length > 0 %}
 oidc_issuer_url = {{ himmelblau_oidc_issuer_url }}
 {% endif %}
 {% if himmelblau_sudo_groups | length > 0 %}
@@ -52,7 +52,7 @@ local_sudo_group = {{ himmelblau_local_sudo_group }}
 {% if himmelblau_home_prefix | length > 0 %}{% set __ns.typed = __ns.typed + ['home_prefix'] %}{% endif %}
 {% if himmelblau_logon_token_app_id | length > 0 %}{% set __ns.typed = __ns.typed + ['logon_token_app_id'] %}{% endif %}
 {% if himmelblau_user_map_file | length > 0 %}{% set __ns.typed = __ns.typed + ['user_map_file'] %}{% endif %}
-{% if himmelblau_idp_provider == 'generic' and himmelblau_oidc_issuer_url | length > 0 %}{% set __ns.typed = __ns.typed + ['oidc_issuer_url'] %}{% endif %}
+{% if himmelblau_oidc_issuer_url | length > 0 %}{% set __ns.typed = __ns.typed + ['oidc_issuer_url'] %}{% endif %}
 {% if himmelblau_sudo_groups | length > 0 %}{% set __ns.typed = __ns.typed + ['sudo_groups', 'local_sudo_group'] %}{% endif %}
 {% for key, value in (himmelblau_extra_config | dictsort) if key not in __ns.typed %}
 {# A YAML bool would render Python-cased True/False; emit INI-style lowercase like the typed keys. #}

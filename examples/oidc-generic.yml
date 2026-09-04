@@ -1,21 +1,34 @@
 ---
 # Sovereign / non-Microsoft OIDC deployment (Keycloak, Authentik, Zitadel, ...).
 #
-# In generic mode both himmelblau_oidc_issuer_url and himmelblau_app_id are
-# required. The issuer URL must EXACTLY match the provider's advertised issuer
-# (including any path component) or provider discovery fails.
-# himmelblau_domain is not needed - the issuer URL is the identity anchor.
+# Setting himmelblau_oidc_issuer_url is what selects OIDC: Himmelblau authenticates against that
+# provider instead of using its native Entra flow. The issuer URL must EXACTLY match the provider's
+# advertised issuer (including any path component) or provider discovery fails, and
+# himmelblau_app_id is required as the OIDC client id.
+#
+# himmelblau_domain is not needed here — OIDC users need not sign in with a UPN, so the issuer is
+# the identity anchor. (For Entra, domain IS required.)
+#
+# Two things the provider must be configured for, or the login fails after the user has already
+# approved it (see README "Generic OIDC"):
+#   * offline_access — Himmelblau's device flow always requests this scope, so the client must
+#     carry it and the user must be allowed offline tokens. This is required for the LOGIN itself,
+#     not just for Hello.
+#   * refresh tokens — needed only additionally for Windows-Hello PIN enrollment; if the client
+#     does not allow them, set himmelblau_enable_hello: false.
 - name: Deploy Himmelblau against a generic OIDC provider
   hosts: servers
   become: true
   vars:
-    himmelblau_idp_provider: generic
     himmelblau_oidc_issuer_url: https://id.example.org/realms/corp
-    himmelblau_app_id: 6b2f4d1c-9e3a-4c58-b7f0-1a2b3c4d5e6f  # OIDC client id
-    # Required unless the OIDC client allows refresh tokens and includes the
-    # offline_access scope; otherwise Hello PIN enrollment fails at login.
+    himmelblau_app_id: himmelblau-linux  # the OIDC client id
     himmelblau_enable_hello: false
+    # Who may log in. Himmelblau >= 4.0 matches OIDC group and role claims here — the exact value
+    # emitted in the userinfo groups, realm_access.roles or resource_access roles claim. On older
+    # builds an OIDC token carries no group claims, so list the users instead (by the name they
+    # sign in with), as below.
     himmelblau_pam_allow_groups:
-      - 0d8f4c21-5a6e-4b3d-9c7f-2e1a8b9c0d3e  # group allowed to log in
+      - linux-users               # an OIDC group/role claim value (Himmelblau >= 4.0)
+      - alice@id.example.org      # a user, which works on every version
   roles:
     - role: ansible-himmelblau

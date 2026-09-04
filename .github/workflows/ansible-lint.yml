@@ -1,13 +1,18 @@
 ---
 name: Ansible Lint
 
-on:  # yamllint disable-line rule:truthy
+on:
   push:
     branches: [main]
   pull_request:
   schedule:
     - cron: "0 2 1 * *"
   workflow_dispatch:
+
+# Least privilege: the job only reads the tree and runs linters. Without this the token
+# inherits the repository/organisation default, which is often read/write.
+permissions:
+  contents: read
 
 jobs:
   ansible_lint:
@@ -26,8 +31,16 @@ jobs:
           pip3 install ansible==11.3.0
           pip3 install ansible-core==2.18.3
           pip3 install ansible-lint==26.1.1
+          pip3 install yamllint==1.35.1
 
-      - name: Run ansible-lint
-        working-directory: ${{ github.workspace }}
+      # ansible-lint excludes examples/, so without this step the shipped example playbooks
+      # would have no CI coverage at all. Both linters are the declared standard.
+      - name: Run yamllint
         run: |
-          ansible-lint -v
+          yamllint -c .yamllint.yml .
+
+      # --offline: the collections are already present via the pinned ansible package, so the
+      # linter must not resolve anything over the network while linting a pull request.
+      - name: Run ansible-lint
+        run: |
+          ansible-lint --offline -v

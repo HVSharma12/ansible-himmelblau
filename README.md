@@ -47,9 +47,9 @@ On non-transactional systems the variable is ignored and the role never reboots 
 - **ansible-core >= 2.18** — the version SLES 16 ships, and the role's `min_ansible_version`.
 - The `community.general` collection (see
   [`meta/collection-requirements.yml`](meta/collection-requirements.yml)).
-- An Entra ID tenant **or** a standards-compliant OIDC issuer. `domain` is optional (Entra infers it
-  from the first user's UPN); generic OIDC requires `himmelblau_oidc_issuer_url` **and**
-  `himmelblau_app_id`. See [Generic OIDC](#generic-oidc).
+- An Entra ID tenant **or** a standards-compliant OIDC issuer. For Entra, set `himmelblau_domain`;
+  for generic OIDC, set `himmelblau_oidc_issuer_url` **and** `himmelblau_app_id` (`domain` is then
+  optional). See [Generic OIDC](#generic-oidc).
 - Managed hosts registered with the SUSE Customer Center or an RMT/SMT mirror — the Himmelblau
   packages come from the SLE 16.1 base product; the role adds no repository.
 - Network egress from the managed hosts to `login.microsoftonline.com` (Entra authentication) and
@@ -68,7 +68,6 @@ ready-to-run version):
   become: true
   vars:
     himmelblau_domain: contoso.onmicrosoft.com
-    himmelblau_app_id: d023f7aa-d214-4b59-911d-6074de623765
     himmelblau_pam_allow_groups:
       - f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12   # "Linux Users" Entra group GUID
     himmelblau_local_groups:
@@ -92,15 +91,14 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 
 | Variable | Default | Description |
 |---|---|---|
-| `himmelblau_domain` | `""` | Entra ID domain users authenticate against. **Optional** — Entra infers it from the first user's UPN if unset. The role requires `domain`, **or** `oidc_issuer_url` when `idp_provider: generic`, unless `idp_provider: none`. Rendered only when set. |
-| `himmelblau_app_id` | `""` | Entra application (client) ID for directory operations. **Required when `idp_provider: generic`** (the OIDC client id; also reused for logon-token acquisition when `logon_token_app_id` is unset). Rendered only when set. |
-| `himmelblau_idp_provider` | `entra` | IdP mode: `entra` (Microsoft Entra ID) \| `generic` (sovereign OIDC via `himmelblau_oidc_issuer_url`) \| `none`. |
-| `himmelblau_oidc_issuer_url` | `""` | OIDC issuer URL; rendered only when `himmelblau_idp_provider: generic`. Must **exactly** match the provider's advertised issuer (incl. path) or discovery fails. |
-| `himmelblau_pam_allow_groups` | `[]` | Entra group GUIDs/UPNs allowed to log in. Empty = allow all. |
+| `himmelblau_domain` | `""` | Entra ID domain users authenticate against. **Required for Entra**; optional only when `oidc_issuer_url` is set, since OIDC users need not sign in with a UPN. Rendered only when set. |
+| `himmelblau_app_id` | `""` | Application (client) ID. **Required when `oidc_issuer_url` is set** — it is the OIDC client id. For Entra you will **almost never set it**: only for specific cases such as enumerating groups or reading extended attributes (e.g. `gidNumber` for RFC 2307 idmapping). Rendered only when set. |
+| `himmelblau_oidc_issuer_url` | `""` | OIDC issuer URL. **Setting it selects OIDC** (Keycloak, Authentik, Zitadel, …); leave empty for Entra. Must **exactly** match the provider's advertised issuer (incl. path) or discovery fails. Requires `app_id`. Rendered only when set. |
+| `himmelblau_pam_allow_groups` | `[]` | Users and groups allowed to log in. Empty = allow all. Entra: group Object ID GUIDs (names are not unique) and/or user UPNs. Generic OIDC: the value emitted in the `groups` / `realm_access.roles` / `resource_access` roles claim — **Himmelblau 4.0+ only; on earlier builds (including the 3.1.11 SLE 16.1 ships) list users instead** — see [Generic OIDC](#generic-oidc). |
 | `himmelblau_local_groups` | `[]` | Local groups mapped users are added to (e.g. `["wheel"]`). |
 | `himmelblau_idmap_range` | `"200000-2000200000"` | POSIX UID/GID mapping range. |
 | `himmelblau_shell` | `"/bin/bash"` | Default login shell for mapped users. |
-| `himmelblau_enable_hello` | `true` | Windows-Hello PIN enrollment. For generic OIDC providers whose client app lacks refresh tokens + the `offline_access` scope, set `false` or Hello fails at login — see [Generic OIDC](#generic-oidc). |
+| `himmelblau_enable_hello` | `true` | Windows-Hello PIN enrollment. With generic OIDC, Hello additionally needs the client to allow refresh tokens — set `false` if it does not. This is **not** a substitute for the `offline_access` scope, which the OIDC login itself requires — see [Generic OIDC](#generic-oidc). |
 | `himmelblau_home_attr` | `""` | Attribute that names the home dir (upstream default `uuid`). Rendered only when set. |
 | `himmelblau_home_alias` | `""` | Alternative home-dir naming (upstream default `spn`). Rendered only when set. |
 | `himmelblau_home_prefix` | `""` | Home-directory prefix, e.g. `/home/`. Rendered only when set. |
@@ -124,11 +122,13 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 
 `himmelblau_configure_pam` defaults to `true`, so the role wires Himmelblau into the host PAM stack
 by default. Because `himmelblau_pam_allow_groups` is the **only** key that scopes who can log in (leave
-it empty and **every** Entra tenant user can authenticate), the role **refuses to configure PAM**
-unless login is scoped or allow-all is explicitly accepted:
+it empty and **every** user in the tenant or OIDC realm can authenticate), the role **refuses to
+configure PAM** unless login is scoped or allow-all is explicitly accepted:
 
-- `himmelblau_pam_allow_groups` — scope login to named Entra group GUIDs, **or**
-- `himmelblau_pam_allow_no_groups: true` — consciously accept allow-all login for the whole tenant.
+- `himmelblau_pam_allow_groups` — scope login to named Entra group GUIDs, user UPNs, or generic
+  OIDC claim values (see [Generic OIDC](#generic-oidc) for which apply on your version), **or**
+- `himmelblau_pam_allow_no_groups: true` — consciously accept allow-all login for everyone the
+  provider will authenticate.
 
 > **Admin groups do not scope login.** `himmelblau_local_groups` and `himmelblau_sudo_groups` only
 > control local-group membership and sudo *after* a successful login — they do **not** restrict who
@@ -147,17 +147,28 @@ changes against a machine you cannot physically recover.
 
 ## Generic OIDC
 
-Set `himmelblau_idp_provider: generic` to authenticate against a sovereign / non-Microsoft OIDC
-issuer (Keycloak, Authentik, Zitadel, …) instead of Entra. In this mode:
+Set `himmelblau_oidc_issuer_url` to authenticate against a sovereign / non-Microsoft OIDC issuer
+(Keycloak, Authentik, Zitadel, …) instead of Entra. Setting it is what selects OIDC — Himmelblau
+uses its native Entra flow when the issuer is empty. In this mode:
 
-- **`himmelblau_oidc_issuer_url` and `himmelblau_app_id` are both required.** The issuer URL must
-  match the provider's advertised issuer exactly (including any path component) or provider discovery
-  fails. `app_id` is the OIDC client id.
-- **`domain` is not needed** (leave it empty); the identity anchor is the issuer URL.
-- **Windows Hello and `offline_access`.** `himmelblau_enable_hello` defaults to `true`. With OIDC,
-  Hello enrollment requires the OIDC **client application** to allow refresh tokens and include the
-  `offline_access` scope. If your client is not configured that way, set
-  `himmelblau_enable_hello: false`, or Hello enrollment fails at login.
+- **`himmelblau_app_id` is required** — it is the OIDC client id. The issuer URL must match the
+  provider's advertised issuer exactly (including any path component) or provider discovery fails.
+- **`domain` is not needed** (leave it empty); the identity anchor is the issuer URL. OIDC users
+  need not sign in with a UPN, which is why `domain` is optional here but required for Entra.
+- **`offline_access` is required for the login itself.** Himmelblau signs an OIDC user in with the
+  OAuth 2.0 device flow and always requests the `offline_access` scope, whether or not Hello is
+  enabled. The OIDC **client** must carry that scope and the **user** must be allowed offline
+  tokens, or the login fails with `not_allowed` after the user has already approved the device.
+- **Windows Hello.** `himmelblau_enable_hello` defaults to `true`. Hello enrollment additionally
+  needs the client to allow refresh tokens; if your client is not configured that way, set
+  `himmelblau_enable_hello: false`. That does **not** remove the `offline_access` requirement above.
+- **Login scoping.** From Himmelblau **4.0**, `himmelblau_pam_allow_groups` matches OIDC group and
+  role claims — the exact value emitted in the userinfo `groups`, `realm_access.roles`, or
+  `resource_access` roles claim. On **earlier builds an OIDC token carries no group claims**, so
+  list the users instead, by the name they sign in with (e.g. `alice@id.example.org`); that also
+  works on 4.0+. SLE 16.1 currently ships Himmelblau 3.1.11, so a user list is what works there
+  today. Anyone not listed is denied at the PAM account phase **after** a successful IdP sign-in.
+  The allow-all opt-in (`himmelblau_pam_allow_no_groups: true`) works as on Entra.
 
 See [`examples/oidc-generic.yml`](examples/oidc-generic.yml) for a complete playbook.
 
@@ -194,7 +205,7 @@ playbooks live in [`examples/`](examples/):
 | [`deploy.yml`](examples/deploy.yml) | Minimal deployment: Entra domain, login scoped to one group, `wheel` membership. |
 | [`oidc-generic.yml`](examples/oidc-generic.yml) | Authenticate against a generic OIDC issuer (Keycloak, Authentik, Zitadel) instead of Entra. |
 | [`sudo-and-ssh.yml`](examples/sudo-and-ssh.yml) | Grant sudo to an Entra group and enable SSH login for Entra users. |
-| [`advanced-config.yml`](examples/advanced-config.yml) | Home-directory layout, login shell, idmap range, offline break-glass, repository/package overrides, and the opt-in Intune `apply_policy` passthrough. |
+| [`advanced-config.yml`](examples/advanced-config.yml) | Home-directory layout, login shell, idmap range, offline break-glass, package pinning, and the opt-in Intune `apply_policy` passthrough. |
 | [`staged-rollout.yml`](examples/staged-rollout.yml) | Stage packages and config without starting the daemons or touching PAM/NSS, for phased activation. |
 | [`allow-all-login.yml`](examples/allow-all-login.yml) | Explicit allow-all login opt-in via `himmelblau_pam_allow_no_groups: true`. |
 | [`teardown.yml`](examples/teardown.yml) | `himmelblau_state: absent` — reverts PAM/NSS wiring, removes the config, uninstalls the packages. |
@@ -214,9 +225,8 @@ the operator reboots — see [Transactional systems (SLE 16.1 Immutable)](#trans
 
 Set `himmelblau_state: absent` to tear the deployment down completely: the role reverts the PAM and
 NSS wiring, removes `/etc/himmelblau/himmelblau.conf`, and uninstalls the Himmelblau packages. See
-[`examples/teardown.yml`](examples/teardown.yml). A `network:idm` repository added by the v1.x
-series is not removed (this role manages no repositories) — unwind that with the v1.x teardown or
-remove it yourself.
+[`examples/teardown.yml`](examples/teardown.yml). The role manages no repositories, so it removes
+none.
 
 ## License
 

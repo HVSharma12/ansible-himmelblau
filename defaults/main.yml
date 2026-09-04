@@ -2,26 +2,27 @@
 # defaults/main.yml — public API for ansible-himmelblau.
 # Every variable here MUST be documented in README.md.
 
-# Entra ID domain to authenticate against (e.g. "example.onmicrosoft.com"). OPTIONAL: Entra infers
-# it from the first user's UPN when unset. The role requires himmelblau_domain, OR (only when
-# himmelblau_idp_provider is "generic") himmelblau_oidc_issuer_url, unless himmelblau_idp_provider
-# is "none". Rendered only when set.
+# Entra ID domain to authenticate against (e.g. "example.onmicrosoft.com"). REQUIRED for Entra;
+# optional only when himmelblau_oidc_issuer_url is set, because OIDC users need not sign in with a
+# UPN. Himmelblau does NOT infer it from the first user's UPN. Rendered only when set.
 himmelblau_domain: ""
 
-# Entra application (client) ID for directory operations. REQUIRED when himmelblau_idp_provider is
-# "generic" (used as the OIDC client id; also reused for logon-token acquisition when
-# himmelblau_logon_token_app_id is unset). Rendered only when set.
+# Application (client) ID. REQUIRED when himmelblau_oidc_issuer_url is set — Himmelblau uses it as
+# the OIDC client id. For Entra you will almost never set it: it is needed only in specific cases
+# such as enumerating groups or reading extended attributes (e.g. gidNumber for RFC 2307
+# idmapping). Rendered only when set.
 himmelblau_app_id: ""
 
-# Identity provider mode: entra (default, Microsoft Entra ID) | generic (sovereign
-# OIDC via himmelblau_oidc_issuer_url, e.g. Keycloak/Authentik/Zitadel) | none.
-himmelblau_idp_provider: entra
-
-# OIDC issuer URL for himmelblau_idp_provider=generic. Must EXACTLY match the provider's advertised
-# issuer (including any path) or provider discovery fails. Rendered only in that mode.
+# OIDC issuer URL. Setting it IS the mode switch: Himmelblau authenticates against this OIDC
+# provider (Keycloak/Authentik/Zitadel, ...); leave it empty for the native Entra flow.
+# Must EXACTLY match the provider's advertised issuer (including any path) or discovery fails.
+# Requires himmelblau_app_id. Rendered only when set.
 himmelblau_oidc_issuer_url: ""
 
-# Entra ID group GUIDs (or UPNs) allowed to log in via PAM. Empty = allow all.
+# Users and groups allowed to log in via PAM. Empty = allow all. Entra: group Object ID GUIDs
+# (names are not unique) and/or user UPNs. Generic OIDC: the exact value emitted in the userinfo
+# groups / realm_access.roles / resource_access roles claim — Himmelblau >= 4.0 only; on older
+# builds an OIDC token carries no group claims, so list users there.
 himmelblau_pam_allow_groups: []
 
 # Local groups Himmelblau users are added to (e.g. ["wheel"] or ["sudo"]).
@@ -33,9 +34,10 @@ himmelblau_idmap_range: "200000-2000200000"
 # Default login shell for mapped users.
 himmelblau_shell: "/bin/bash"
 
-# Windows-Hello PIN enrollment (upstream default true). For generic OIDC providers whose client app
-# does NOT allow refresh tokens + the offline_access scope, set this false or Hello enrollment fails
-# at login. See "Generic OIDC" in README.
+# Windows-Hello PIN enrollment (upstream default true). Hello additionally needs the OIDC client to
+# allow refresh tokens — set this false if it does not, or enrollment fails after the first login.
+# NOTE: this does not rescue a client without offline_access; that scope is required for the OIDC
+# LOGIN itself (Himmelblau's device flow always requests it). See "Generic OIDC" in README.
 himmelblau_enable_hello: true
 
 # Home-directory layout (rendered only when set; empty = himmelblau's own default).

@@ -66,45 +66,44 @@
       - ansible_facts['distribution'] in ["SLES", "SL-Micro"]
       - ansible_facts['distribution_version'] is version('16.1', '>=')
     fail_msg: >-
-      This role supports SLE 16.1 and later only — it installs Himmelblau from the SLE 16.1 base
-      product and adds no repository. This host is
+      This role supports SLES 16.1+ and SL-Micro 16.1+ (the Immutable variant) only — it installs
+      Himmelblau from the SLE 16.1 base product and adds no repository. This host is
       {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
       For SLE 15.x / SLE 16.0 / openSUSE, use the v1.x series, which manages the network:idm
-      repository. Registration with the SUSE Customer Center (or an RMT/SMT mirror) is also
-      required — without it the packages will not resolve.
+      repository. Ansible reports the SAP and Desktop variants as SLES_SAP / SLED, which this
+      role does not claim support for and has never been tested on; if you are on such a 16.1
+      host and want to proceed anyway, the packages resolve the same way — set
+      himmelblau_packages yourself and wire PAM with configure_pam=false, or raise an issue.
+      Registration with the SUSE Customer Center (or an RMT/SMT mirror) is also required —
+      without it the packages will not resolve.
     quiet: true
   when: himmelblau_state == "present"
 
-- name: Validate the IdP provider and its required keys
+# The IdP mode is not a variable: Himmelblau derives it from oidc_issuer_url alone — set, and it
+# authenticates against that OIDC provider; unset, and it uses its native Entra flow. So the role
+# validates the same way, rather than through a provider switch of its own.
+- name: Assert the OIDC client id is set when an OIDC issuer is configured
   ansible.builtin.assert:
     that:
-      - himmelblau_idp_provider in ['entra', 'generic', 'none']
-      - not (himmelblau_idp_provider == 'generic' and himmelblau_oidc_issuer_url | length == 0)
-      - not (himmelblau_idp_provider == 'generic' and himmelblau_app_id | length == 0)
+      - not (himmelblau_oidc_issuer_url | length > 0 and himmelblau_app_id | length == 0)
     fail_msg: >-
-      himmelblau_idp_provider must be entra, generic, or none; generic OIDC requires both
-      himmelblau_oidc_issuer_url and himmelblau_app_id (the OIDC client id) to be set.
+      himmelblau_oidc_issuer_url is set, so himmelblau_app_id is required — Himmelblau uses it as
+      the OIDC client id. Leave the issuer empty to authenticate against Entra instead.
     quiet: true
   when: himmelblau_state == "present"
 
-# domain is OPTIONAL upstream (Entra infers it from the first user's UPN), so the role does not
-# hard-require it; it only insists on at least one identity anchor unless the provider is "none".
-- name: Assert at least one identity anchor is configured
+# domain is REQUIRED for Entra and optional only when authenticating via OIDC, because OIDC users
+# need not sign in with a UPN. It is NOT inferred from the first user's UPN — upstream's
+# own domain.xml says both, and the maintainer confirmed the inference half is wrong.
+- name: Assert an identity anchor is configured
   ansible.builtin.assert:
-    # oidc_issuer_url only counts as an anchor under provider 'generic' — the template renders it
-    # only in that mode (himmelblau.conf.j2), so crediting it for 'entra' would pass validation yet
-    # emit an anchor-less [global]. So: none, OR a domain, OR generic-with-issuer.
     that:
-      - >-
-        himmelblau_idp_provider == 'none'
-        or himmelblau_domain | length > 0
-        or (himmelblau_idp_provider == 'generic' and himmelblau_oidc_issuer_url | length > 0)
+      - himmelblau_domain | length > 0 or himmelblau_oidc_issuer_url | length > 0
     fail_msg: >-
-      Set himmelblau_domain (Entra) or, with himmelblau_idp_provider=generic,
-      himmelblau_oidc_issuer_url as the identity anchor. domain is optional upstream — Entra infers
-      it from the first user's UPN — but the role still needs one anchor. Note oidc_issuer_url is
-      only an anchor in generic mode; setting it while provider stays 'entra' does not count.
-      (himmelblau_idp_provider 'none' is for the no-IdP case only.)
+      Set himmelblau_domain — required to authenticate against Entra ID — or
+      himmelblau_oidc_issuer_url to authenticate against a generic OIDC provider (with which
+      domain is optional). A config with neither has no identity anchor and cannot authenticate
+      anyone.
     quiet: true
   when: himmelblau_state == "present"
 
