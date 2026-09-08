@@ -212,9 +212,15 @@ playbooks live in [`examples/`](examples/):
 
 ## Idempotency and check mode
 
-A second run of the role against an already-converged host reports zero changes. The role is
-check-mode safe (`ansible-playbook --check` previews without modifying the host). Configuration
+A second run of the role against an already-converged host reports zero changes. Configuration
 changes restart the `himmelblaud` / `himmelblaud-tasks` daemons via handlers.
+
+A dry run (`ansible-playbook --check`) never writes to the host, and against an already-converged
+host it reports no changes. Against a host the role has **not** converged yet it under-reports: the
+PAM and NSS wiring steps act on packages and files a dry run has not created, so they are skipped
+rather than previewed. On a transactional system a dry run of an unconverged host also reaches the
+reboot contract and stops there unless `himmelblau_transactional_update_reboot_ok` is set — see
+[Transactional systems (SLE 16.1 Immutable)](#transactional-systems-sle-161-immutable).
 
 On transactional systems the zero-changed guarantee holds once the reboot that applies the staged
 transaction has happened: `himmelblau_transactional_update_reboot_ok: true` reaches that state in a
