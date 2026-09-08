@@ -1,0 +1,383 @@
+---
+# Smoke + gate test: a minimal
+# domain-only deploy must
+#   1. install every package in the himmelblau set (positively asserted via package_facts plus a
+#      provides-aware rpm probe — nss-himmelblau is a capability, not an rpm name),
+#   2. render the config,
+#   3. be IDEMPOTENT — a second converge rewrites neither himmelblau.conf nor nsswitch.conf,
+#   4. positively wire himmelblau into every NSS database exactly once (no vacuous teardown pass)
+#      AND into the PAM auth/account stacks (pam-config query non-empty),
+#   5. leave the daemons ENABLED but NOT started — start_services=false — with nscd
+#      MASKED where the unit exists (not merely "not running"),
+#   6. render no [offline_breakglass] section when the feature is off,
+#   7. create the tss group himmelblaud.service needs, and render the config with the LSR
+#      "Ansible managed" header and a pinned owner/mode,
+# and the himmelblau_state enum guard must reject a typo (negative leg). A final play converges
+# under gather_facts: false — the only reason tasks/main.yml gathers the distribution subset
+# itself — and untested until now.
+- name: Test himmelblau default deployment
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    # Domain-only smoke: explicitly accept allow-all PAM (no group scoping) so the
+    # login-scoping guard is satisfied without naming groups.
+    himmelblau_pam_allow_no_groups: true
+    # Tenant-less CI: deploy + configure but don't start the daemon (needs a real
+    # Entra tenant to initialize).
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify deployment, idempotency, NSS/PAM wiring, and daemon enablement
+  hosts: all
+  vars_files:
+    - vars/pam_account_control.yml
+  become: true
+  tasks:
+    # AC#1 positive proof: the whole package set is installed — not inferred from a
+    # unit or a PAM module existing, but read from the rpm database.
+    - name: Gather package facts to assert the himmelblau set installed
+      ansible.builtin.package_facts:
+
+    # NOTE: this literal list encodes the SUSE package set (vars/Suse.yml) — the only gated
+    # platform; a future non-SUSE gate must derive it from that distro's vars instead.
+    - name: Assert every himmelblau package is present (himmelblau, pam-, -sso)
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' in ansible_facts.packages"
+          - "'pam-himmelblau' in ansible_facts.packages"
+          - "'himmelblau-sso' in ansible_facts.packages"
+        fail_msg: >-
+          A package from the himmelblau set is missing after a present converge:
+          {{ ['himmelblau', 'pam-himmelblau', 'himmelblau-sso']
+             | difference(ansible_facts.packages.keys()) }}
+        quiet: true
+
+    # nss-himmelblau is a virtual CAPABILITY, not an rpm name — the base product ships the NSS
+    # module as the soname-versioned libnss_himmelblau2 — found by this assert on 3.1.7.
+    # The role correctly installs by the stable capability; assert it the same provides-aware way.
+    # noqa on the probe: package_facts exposes rpm NAMES only, not Provides — whatprovides is the
+    # only way to check a capability, and no module wraps it.
+    - name: Resolve which rpm provides the nss-himmelblau capability
+      ansible.builtin.command: # noqa: command-instead-of-module
+        cmd: rpm -q --whatprovides nss-himmelblau
+      register: __nss_pkg
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the NSS module package is installed (via its provides)
+      ansible.builtin.assert:
+        that:
+          - __nss_pkg.rc == 0
+        fail_msg: >-
+          No installed rpm provides nss-himmelblau ({{ __nss_pkg.stdout | trim }}) — the NSS
+          module (libnss_himmelblau*) is missing after a present converge.
+        quiet: true
+
+    - name: Snapshot himmelblau.conf (checksum) before the second converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __conf_before
+
+    - name: Assert config was rendered
+      ansible.builtin.assert:
+        that:
+          - __conf_before.stat.exists
+        quiet: true
+
+    - name: Read nsswitch.conf before the second converge
+      ansible.builtin.slurp:
+        src: /etc/nsswitch.conf
+      register: __nss_before
+
+    # The real idempotency gate — the qemu test runner does NOT double-run: converge a
+    # second time against the already-converged host and prove the drift-prone tasks (template
+    # render, nsswitch replace) are no-ops. A duplicate NSS token or a re-render fails the asserts.
+    - name: Converge a SECOND time to prove idempotency
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: example.onmicrosoft.com
+        himmelblau_pam_allow_no_groups: true
+        himmelblau_start_services: false
+
+    - name: Re-read himmelblau.conf and nsswitch.conf after the second converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __conf_after
+
+    - name: Slurp himmelblau.conf and nsswitch.conf after the second converge
+      ansible.builtin.slurp:
+        src: "{{ __src }}"
+      loop:
+        - /etc/himmelblau/himmelblau.conf
+        - /etc/nsswitch.conf
+      loop_control:
+        loop_var: __src
+      register: __after
+
+    - name: Assert the second converge changed neither the config nor nsswitch (idempotent)
+      ansible.builtin.assert:
+        that:
+          - __conf_after.stat.checksum == __conf_before.stat.checksum
+          - (__after.results[1].content | b64decode) == (__nss_before.content | b64decode)
+        fail_msg: >-
+          Second converge rewrote himmelblau.conf or nsswitch.conf — the role is NOT idempotent.
+        quiet: true
+
+    - name: Assert NSS is positively and singly wired to himmelblau (non-vacuous)
+      ansible.builtin.assert:
+        that:
+          # All three DB lines must EXIST and carry himmelblau exactly once — the old
+          # "line-absent passes" escape let a silently-unwired group/shadow DB go green; the
+          # role's replace is a no-op on a missing line, so absence must fail, not pass.
+          - "'himmelblau' in __passwd_line"
+          - __passwd_line | regex_findall('himmelblau') | length == 1
+          - __group_line | length > 0
+          - __group_line | regex_findall('himmelblau') | length == 1
+          - __shadow_line | length > 0
+          - __shadow_line | regex_findall('himmelblau') | length == 1
+        fail_msg: >-
+          NSS not wired to himmelblau exactly once in every DB. passwd: {{ __passwd_line }}
+          group: {{ __group_line }} shadow: {{ __shadow_line }}
+        quiet: true
+      # Named for this file. A bare __nss here was silently shadowed by a same-named register in
+      # tests_absent.yml whenever both files ran in one tox-lsr invocation: registered vars outrank
+      # task vars and persist across playbooks, so these three came out empty and the assert failed
+      # on a correctly-wired host.
+      vars:
+        __nss_content: "{{ __after.results[1].content | b64decode }}"
+        __passwd_line: "{{ __nss_content | regex_search('(?m)^passwd:.*$') | default('', true) }}"
+        __group_line: "{{ __nss_content | regex_search('(?m)^group:.*$') | default('', true) }}"
+        __shadow_line: "{{ __nss_content | regex_search('(?m)^shadow:.*$') | default('', true) }}"
+
+    # AC#3 PAM positive proof: himmelblau is actually in the auth AND account stacks —
+    # previously only asserted as ABSENT after teardown (vacuous if wiring never happened).
+    - name: Query pam-config for the himmelblau module
+      ansible.builtin.command:
+        cmd: pam-config --query --himmelblau
+      register: __pam_query
+      changed_when: false
+      # failed_when so a broken profile reaches the assert's diagnosis instead of a raw error
+      failed_when: false
+
+    - name: Read the assembled PAM auth/account stacks
+      ansible.builtin.slurp:
+        src: "{{ __pam_file }}"
+      loop:
+        - /etc/pam.d/common-auth
+        - /etc/pam.d/common-account
+      loop_control:
+        loop_var: __pam_file
+      register: __pam_stacks
+
+    - name: Assert pam_himmelblau is wired into both auth and account stacks
+      ansible.builtin.assert:
+        that:
+          - __pam_query.stdout | trim | length > 0
+          - "'pam_himmelblau' in (__pam_stacks.results[0].content | b64decode)"
+          - "'pam_himmelblau' in (__pam_stacks.results[1].content | b64decode)"
+        fail_msg: >-
+          pam_himmelblau is not positively wired (query: {{ __pam_query.stdout | trim }}) —
+          auth/account stack membership must be proven, not assumed.
+        quiet: true
+
+    # The himmelblau ACCOUNT line must carry the upstream-declared control: pam-config
+    # < 2.14 hardcodes `required`; v1.x rewrote it to `sufficient`, which — once himmelblau >= 3.1.8
+    # serves synthetic shadow entries — let out-of-group Entra users through pam_unix. The role now
+    # sets `[success=ok auth_err=die default=ignore]` (what himmelblau >= 3.1.12 itself writes on
+    # upgrade). Assert the exact control and that neither legacy form survives; the regexes are
+    # pinned once in vars/pam_account_control.yml (vars_files above).
+    - name: Assert the himmelblau account control is the upstream-declared control
+      ansible.builtin.assert:
+        that:
+          - (__pam_stacks.results[1].content | b64decode) is search(__account_ctl_re)
+          - not ((__pam_stacks.results[1].content | b64decode) is search(__legacy_ctl_re))
+        fail_msg: >-
+          The himmelblau account line does not carry [success=ok auth_err=die default=ignore] —
+          either pam-config's `required` was not rewritten, or a legacy `sufficient` survives
+          (which lets out-of-group Entra users log in). The pamd task did not apply.
+        quiet: true
+
+    - name: Gather service facts to check daemon enablement/state
+      ansible.builtin.service_facts:
+
+    - name: Assert daemons are enabled but not running
+      ansible.builtin.assert:
+        that:
+          # present enables the daemons (reboot-survivable); start_services=false keeps them down.
+          - __svcs['himmelblaud.service'].status | default('') == 'enabled'
+          - __svcs['himmelblaud-tasks.service'].status | default('') == 'enabled'
+          - __svcs['himmelblaud.service'].state | default('stopped') != 'running'
+          - __svcs['himmelblaud-tasks.service'].state | default('stopped') != 'running'
+        fail_msg: >-
+          Expected himmelblaud + himmelblaud-tasks enabled and stopped. Got
+          himmelblaud={{ __svcs['himmelblaud.service'] | default('absent') }}
+        quiet: true
+      vars:
+        __svcs: "{{ ansible_facts.services }}"
+
+    # Prove BOTH halves of the role's nscd contract — tasks/nss.yml pairs masked:true
+    # with state:stopped precisely because masking alone does not stop a running instance. The
+    # old state!=running assert was also vacuous when nscd was absent; these probes are not:
+    # is-enabled must say masked — or unit-not-found, the tolerated case — and is-active
+    # must not be active. LC_ALL pins the ENOENT stderr text the assert matches.
+    # noqa on the probes: service_facts is unreliable for nscd — phantom entries — and
+    # the systemd module manages state rather than querying it — is-enabled/is-active ARE the query.
+    - name: Probe nscd's unit-file state
+      ansible.builtin.command: systemctl is-enabled nscd.service # noqa: command-instead-of-module
+      environment:
+        LC_ALL: C
+      register: __nscd_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Probe nscd's runtime state
+      ansible.builtin.command: systemctl is-active nscd.service # noqa: command-instead-of-module
+      register: __nscd_active
+      changed_when: false
+      failed_when: false
+
+    - name: Assert nscd is masked (or genuinely not installed) AND not running
+      ansible.builtin.assert:
+        that:
+          - >-
+            'masked' in __nscd_probe.stdout
+            or 'No such file or directory' in __nscd_probe.stderr
+          - __nscd_active.rc != 0
+        fail_msg: >-
+          nscd must be masked and stopped (is-enabled: {{ __nscd_probe.stdout | trim }}
+          {{ __nscd_probe.stderr | trim }}; is-active rc={{ __nscd_active.rc }}) — a running
+          nscd serves cached lookups that bypass the himmelblau NSS module.
+        quiet: true
+
+    - name: Assert a plain deploy renders no offline_breakglass section
+      ansible.builtin.assert:
+        that:
+          - "'[offline_breakglass]' not in (__after.results[0].content | b64decode)"
+        quiet: true
+
+    # himmelblaud.service declares SupplementaryGroups=tss, and systemd refuses to start a unit
+    # whose SupplementaryGroups names a missing group (status=216/GROUP). The group is absent on a
+    # minimal image, so tasks/service.yml creates it — a bug found on a live VM. Nothing
+    # asserted it until now, so dropping that task would leave CI green while every real deploy
+    # failed to start the daemon.
+    - name: Probe the tss group himmelblaud.service requires
+      ansible.builtin.getent:
+        database: group
+        key: tss
+      register: __tss_group
+      failed_when: false
+
+    - name: Assert the tss group exists
+      ansible.builtin.assert:
+        that:
+          # Only this clause does any work: the probe above sets failed_when: false, so a
+          # "__tss_group is not failed" clause would be true unconditionally.
+          - "'tss' in (ansible_facts.getent_group | default({}))"
+        fail_msg: >-
+          The tss group is missing. himmelblaud.service names it in SupplementaryGroups, so
+          systemd will refuse to start the daemon with status=216/GROUP.
+        quiet: true
+
+    - name: Stat the config file and its directory
+      ansible.builtin.stat:
+        path: "{{ __managed_path }}"
+      loop:
+        - /etc/himmelblau
+        - /etc/himmelblau/himmelblau.conf
+      loop_control:
+        loop_var: __managed_path
+      register: __conf_stat
+
+    # The config can carry app_id, so pin owner and mode rather than only watching them for churn:
+    # a regression that widened either would otherwise ship unnoticed.
+    - name: Assert the config is root-owned with the intended modes, and carries the LSR header
+      ansible.builtin.assert:
+        that:
+          - __conf_stat.results[0].stat.mode == '0755'
+          - __conf_stat.results[0].stat.pw_name == 'root'
+          - __conf_stat.results[1].stat.mode == '0644'
+          - __conf_stat.results[1].stat.pw_name == 'root'
+          - __conf_stat.results[1].stat.gr_name == 'root'
+          # The template's first line is `{{ ansible_managed | comment }}`; the rendered text is
+          # what tells an operator not to hand-edit the file.
+          - "'Ansible managed' in (__after.results[0].content | b64decode)"
+        fail_msg: >-
+          himmelblau.conf must be 0644 root:root in a 0755 root-owned directory and carry the
+          Ansible-managed header.
+        quiet: true
+
+# Negative leg: a himmelblau_state typo must abort at the enum guard, not
+# silently drive a partial teardown. Tenant-less — the guard is pre-flight; no state change.
+- name: State enum guard rejects an invalid himmelblau_state
+  hosts: all
+  become: true
+  tasks:
+    - name: Run the role with a bogus state (expect a guard abort)
+      block:
+        - name: Include the role — should fail at the state enum guard
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_state: bogus
+            himmelblau_start_services: false
+
+        - name: Fail the test if the state guard did not abort
+          ansible.builtin.fail:
+            msg: "Expected the state enum guard to abort the run, but the role completed."
+      rescue:
+        - name: Confirm the abort was the state enum guard (not some other error)
+          ansible.builtin.assert:
+            that:
+              - "'himmelblau_state must be' in (ansible_failed_result.msg | default(''))"
+            fail_msg: >-
+              Role failed, but not on the state enum guard. Got:
+              {{ ansible_failed_result.msg | default('(no msg)') }}
+            quiet: true
+
+# tasks/main.yml opens by gathering the distribution subset when the facts it dispatches on are
+# missing — the standard LSR pattern, added because a parent play with
+# gather_facts: false died on an opaque undefined-variable error before any of the role's own
+# clear guards could speak. Gathering there is the entire reason the role tolerates un-gathered
+# facts, and no test had ever run without them. The play COMPLETING is the contract.
+- name: The role converges under a parent play with gather_facts disabled
+  hosts: all
+  gather_facts: false
+  become: true
+  pre_tasks:
+    # gather_facts: false alone is NOT enough to reach the task this play exists for. Facts
+    # gathered by an earlier play stay in the host cache for the whole run, so
+    # ansible_facts['distribution'] would still be defined, the role's own subset gather would be
+    # skipped, and deleting it from tasks/main.yml would leave this play green (measured).
+    # clear_facts empties the gathered facts — note it does NOT clear include_vars or set_fact, so
+    # the vars dispatch is not exercised from scratch here, only the fact gathering.
+    - name: Clear the facts earlier plays gathered, so the role must gather its own
+      ansible.builtin.meta: clear_facts
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify the un-gathered converge still rendered the config
+  hosts: all
+  become: true
+  tasks:
+    - name: Read the config written by the un-gathered converge
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __ungathered_conf
+
+    - name: Assert the role dispatched and rendered without pre-gathered facts
+      ansible.builtin.assert:
+        that:
+          - "'domain = example.onmicrosoft.com' in (__ungathered_conf.content | b64decode)"
+        fail_msg: >-
+          The role completed with gather_facts: false but did not render the config — the
+          distribution dispatch did not resolve.
+        quiet: true

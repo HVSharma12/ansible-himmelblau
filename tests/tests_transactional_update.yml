@@ -1,0 +1,247 @@
+---
+# Transactional-update reboot contract, exercised on the normal (non-transactional) gate
+# image by injecting the LSR-style __himmelblau_is_transactional flag — the same mechanism upstream
+# LSR roles use to test this path. Five legs:
+#   1. reboot_ok UNSET (null) + a real package change   -> the role must FAIL with the exact
+#      contract message (rescued negative leg), and must NOT reboot.
+#   2. state=absent with reboot_ok=false                -> staged removal notifies and CONTINUES.
+#   3. reboot_ok=false on PRESENT (staged-rollout pair) -> notifies, skips unit management rather
+#      than dying, and CONTINUES without reboot (the deferred-reboot path).
+#   4. reboot_ok UNSET on ABSENT + a real package change -> the REMOVAL-side include must fire and
+#      produce the same contract failure (rescued negative). Leg 1 pins the install side; without
+#      this leg the removal-side block could be deleted and leg 2 would still pass.
+#   5. flag NOT injected (an inherited false host fact from the establishing play, since the
+#      detection block is skipped once the flag is defined) -> default path wholly unaffected.
+# boot_id is snapshotted first and asserted unchanged at the end: no leg may actually reboot.
+# The real reboot path, and the units-missing-until-reboot skip, cannot run under this harness
+# (the Immutable image has no cloud-init); their ground truth is the measured probes recorded in
+# the decision record and the workspace tests/agama/ playbooks.
+# The platform guard's own legs live in tests_platform_support.yml — this file is the
+# reboot contract only.
+
+# Leg 1 needs the package install to be a real CHANGE, or the staged-reboot include never fires and
+# the contract failure it asserts cannot happen. Establish that here rather than inheriting it from
+# whatever ran before: several tests_*.yml passed to one tox-lsr invocation share a single VM, so a
+# preceding test may well have left the packages installed.
+- name: Establish an uninstalled starting point (this file must not assume a fresh VM)
+  hosts: all
+  become: true
+  vars:
+    himmelblau_state: absent
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Transactional contract leg 1 — unset reboot_ok must fail after a staged change
+  hosts: all
+  become: true
+  tasks:
+    - name: Snapshot boot_id (no leg of this test may reboot the VM)
+      ansible.builtin.slurp:
+        src: /proc/sys/kernel/random/boot_id
+      register: __boot_id_before
+
+    - name: Confirm the packages really are absent (leg 1's premise, not an assumption)
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Assert himmelblau is not installed, so the install below is a real change
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' not in ansible_facts.packages"
+        fail_msg: >-
+          The himmelblau package is still installed after the establishing teardown, so leg 1's
+          install would report ok rather than changed, the staged-reboot include would never fire,
+          and the contract failure this leg asserts could not happen.
+        quiet: true
+
+    - name: Converge with the transactional flag injected and reboot_ok left unset
+      block:
+        - name: Apply the role (expect the contract failure, after packages staged)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+            __himmelblau_is_transactional: true
+
+        # Sentinel message deliberately avoids every token the rescue asserts on, so a regression
+        # that lets the role complete cannot satisfy the assert with this sentinel's own text.
+        - name: Fail if the contract failure did not trigger
+          ansible.builtin.fail:
+            msg: >-
+              The role completed although the host is (injected) transactional, a package
+              transaction changed, and the reboot variable was left at its default —
+              the contract demands a hard stop here.
+      rescue:
+        # Assert the EXACT designed contract message, not a variable-name substring: on a future
+        # ansible-core (2.23+) a null-coercion regression would fail with a templating error that
+        # still quotes the conditional (and thus the variable name) — this assert must catch that.
+        - name: Assert the failure is the reboot-contract one
+          ansible.builtin.assert:
+            that:
+              - >-
+                'Reboot is required but not allowed'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The converge failed, but not with the reboot-contract message:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true
+
+# THE FLAG MUST BE INJECTED THROUGH include_role vars, NEVER through play vars. Any run of the role
+# on this host — the establishing play above, or any earlier tests_*.yml in a shared VM — reaches
+# the set_fact at tasks/main.yml:44-46 and pins __himmelblau_is_transactional as a HOST FACT.
+# set_fact outranks play vars, so a play-var injection is silently ignored and the leg quietly
+# converges on the non-transactional path: no reboot include, no notify, and — because these two
+# legs assert only that the play completes — a green result proving nothing. include_role vars are
+# role params and do outrank set_fact, which is why leg 1 was never affected. Measured, not assumed.
+- name: Transactional contract leg 2 — reboot_ok=false notifies and continues on teardown
+  hosts: all
+  become: true
+  tasks:
+    - name: Confirm leg 1 left the packages installed, so this teardown is a real change
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Assert the premise — a staged REMOVAL needs something to remove
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' in ansible_facts.packages"
+        fail_msg: >-
+          The packages are already gone, so this teardown would report ok rather than changed and
+          the removal-side reboot include would never fire — the leg would pass vacuously.
+        quiet: true
+
+    # Leg 1 really installed the packages before its contract failure, so this teardown is a real
+    # package change: the removal-side include fires, notifies, and must NOT reboot or fail.
+    # That the include FIRES at all is pinned by leg 4 below, not here: this leg spends its
+    # package change on the continue contract, and leg 4 gets a fresh one because leg 3 reinstalls.
+    - name: Tear down with the reboot deferred
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_state: absent
+        himmelblau_start_services: false
+        himmelblau_transactional_update_reboot_ok: false
+        __himmelblau_is_transactional: true
+
+- name: Transactional contract leg 3 — reboot_ok=false on present notifies and continues
+  hosts: all
+  become: true
+  tasks:
+    - name: Confirm leg 2 removed the packages, so this install is a real change
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Assert the premise — a staged INSTALL needs something to install
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' not in ansible_facts.packages"
+        fail_msg: >-
+          The packages are still installed, so this converge would report ok rather than changed and
+          the install-side reboot include would never fire — the leg would pass vacuously.
+        quiet: true
+
+    # Leg 2 removed the packages, so this present converge is a real package change on a host the
+    # role believes is transactional, with the reboot deferred: the install-side include must
+    # notify WITHOUT rebooting or failing, and service.yml must gate unit management on unit
+    # existence instead of dying on "unit not found". On this gate image the install is live, so
+    # the units exist and are managed; the units-missing-until-reboot skip itself is proven on the
+    # real Immutable VM. The play COMPLETING is the contract here.
+    - name: Converge with the wiring toggles off and the reboot deferred
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: example.onmicrosoft.com
+        himmelblau_pam_allow_no_groups: true
+        # The staged-rollout pairing the README documents for a deferred reboot: config wiring
+        # off, services not started.
+        himmelblau_configure_nss: false
+        himmelblau_configure_pam: false
+        himmelblau_start_services: false
+        himmelblau_transactional_update_reboot_ok: false
+        __himmelblau_is_transactional: true
+
+# Leg 1 proves the INSTALL-side reboot include fires — its contract failure is produced by nothing
+# else. Until now nothing did the same for the REMOVAL side: delete that whole block from
+# tasks/main.yml and leg 2 would still complete and still pass. Leg 3 has just reinstalled the
+# packages, so a teardown here is a real transaction again and can spend it on this proof.
+- name: Transactional contract leg 4 — the removal-side include fires (rescued negative)
+  hosts: all
+  become: true
+  tasks:
+    - name: Confirm leg 3 left the packages installed
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Assert the premise — a staged REMOVAL needs something to remove
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' in ansible_facts.packages"
+        fail_msg: >-
+          The packages are already gone, so the removal would report ok rather than changed and the
+          include could not fire for the right reason.
+        quiet: true
+
+    - name: Tear down with reboot_ok left unset
+      block:
+        - name: Apply the role (expect the contract failure on the removal side)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_state: absent
+            himmelblau_start_services: false
+            __himmelblau_is_transactional: true
+
+        - name: Fail if the removal-side contract failure did not trigger
+          ansible.builtin.fail:
+            msg: >-
+              The teardown completed although the host is (injected) transactional, the package
+              transaction changed, and the reboot variable was left at its default — so the
+              removal-side reboot include did not fire.
+      rescue:
+        - name: Assert the failure is the reboot-contract one
+          ansible.builtin.assert:
+            that:
+              - >-
+                'Reboot is required but not allowed'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The teardown failed, but not with the reboot-contract message:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true
+
+- name: Transactional contract leg 5 — the default path is unaffected on non-transactional hosts
+  hosts: all
+  become: true
+  vars:
+    # No injected flag. The role's own stat has already run (the establishing play above pinned
+    # __himmelblau_is_transactional as a host fact, and /sbin/transactional-update does not exist
+    # on this image), so the flag is false here and reboot_ok stays at its null default WITHOUT
+    # consequence — which is the contract this leg checks.
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify no leg rebooted the VM
+  hosts: all
+  become: true
+  tasks:
+    - name: Read boot_id after all legs
+      ansible.builtin.slurp:
+        src: /proc/sys/kernel/random/boot_id
+      register: __boot_id_after
+
+    - name: Assert the VM was never rebooted
+      ansible.builtin.assert:
+        that:
+          - >-
+            (__boot_id_after.content | b64decode)
+            == (hostvars[inventory_hostname].__boot_id_before.content | b64decode)
+        fail_msg: >-
+          boot_id changed across the test — some leg rebooted the VM, which the contract forbids
+          for reboot_ok=false/unset and for non-transactional hosts.
+        quiet: true

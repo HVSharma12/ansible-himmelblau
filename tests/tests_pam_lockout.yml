@@ -1,0 +1,160 @@
+---
+# Lock-out safety test: wiring himmelblau into PAM must NEVER prevent a local
+# user (or root) from authenticating — *especially* with himmelblaud stopped, which is the
+# real-world failure mode (tenant unreachable). tests_pam_guard.yml covers the pre-flight
+# refusal; this covers the post-wiring property. Tenant-less: the daemon stays
+# down on purpose (start_services: false) so this leg reproduces the worst case.
+#
+# The role's only supported PAM method is pam-config (tasks/pam.yml hard-fails otherwise). So the
+# safety property reduces to a checkable invariant on the assembled stack: the local fallback
+# (pam_unix) survives and no pam_himmelblau line uses a blocking control (`required`/`requisite`)
+# WITHOUT `ignore_unknown_user`. NOTE: pam-config < 2.14 hardcodes the account line as
+# `required`; the role rewrites it to the upstream-declared `[success=ok auth_err=die
+# default=ignore]`, whose `default=ignore` is a pass-through for local users and a down daemon by
+# construction. Either form is non-blocking for local/down-daemon (not `required`/`requisite`
+# without `ignore_unknown_user`), so the lock-out invariant holds. The real local password
+# conversation through the wired stack is measured on every CI run by
+# tests_pam_account_control.yml (pty-driven `su`, daemons down); the same property was proven
+# on live tenant-converged VMs and on the SLE 16.1 gate image.
+#
+# ⚠️ Full converge: installs pam-himmelblau from the base product so pam-config can
+# wire it. Disposable CI VM only — never run against a host you can't recover.
+
+- name: Wire himmelblau into PAM with the daemon deliberately down
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    # Explicit allow-all opt-in satisfies the login-scoping guard without a tenant.
+    himmelblau_pam_allow_no_groups: true
+    # The crux: do NOT start himmelblaud. pam_himmelblau must fail open to pam_unix.
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Assert the wired PAM stack cannot lock out local logins
+  hosts: all
+  become: true
+  vars:
+    # A himmelblau entry with a blocking control (required/requisite) only locks out local logins if
+    # it ALSO lacks a pass-through for non-himmelblau users. pam-config's supported output wires
+    # `account required pam_himmelblau.so ignore_unknown_user` — ignore_unknown_user makes it SKIP
+    # local (unknown) users, so a down daemon can't gate them; that wiring is SAFE. The invariant is
+    # therefore: no blocking pam_himmelblau line WITHOUT that pass-through, plus pam_unix always
+    # present as the local fallback. (__block_re is double-quoted, NOT a folded '>-' scalar — a
+    # folded scalar mangles the '\\s' backslash and the regex silently matches nothing; the
+    # two-way self-test below guards against that going undetected.)
+    __block_re: "(?m)^.*(?:required|requisite)\\s+pam_himmelblau.*$"
+    __pass_opt: "ignore_unknown_user"
+    # Self-test probes: an unsafe blocking line MUST be flagged; a safe (ignore_unknown_user) one
+    # must NOT — so the detector can never silently pass everything, nor reject the safe wiring.
+    __probe_bad: "auth required pam_himmelblau.so"
+    __probe_ok: "account required pam_himmelblau.so ignore_unknown_user"
+    # The role writes a BRACKETED account control,
+    # `[success=ok auth_err=die default=ignore]`, which the word-control regex above cannot see —
+    # without this, the account-stack half of the invariant would degrade to "pam_unix is present"
+    # and a regression to `default=die` would pass silently.
+    #
+    # For a bracketed control `ignore_unknown_user` does NOT rescue a local user: it makes the
+    # module return PAM_IGNORE, and what happens next is decided by the control's own `ignore=` /
+    # `default=` action, not by the option. So the invariant here is different from the one above —
+    # the PAM_IGNORE outcome must itself be `ignore`. Upstream's declared control satisfies it via
+    # `default=ignore` with no explicit `ignore=` override.
+    __bracket_re: "(?m)^.*\\[[^]]*\\]\\s+pam_himmelblau.*$"
+    __bracket_safe_re: "(?:ignore=ignore|default=ignore)"
+    __bracket_unsafe_re: "ignore=(?!ignore)"
+    __probe_bracket_bad: >-
+      account [success=ok auth_err=die default=die] pam_himmelblau.so ignore_unknown_user
+    __probe_bracket_ok: >-
+      account [success=ok auth_err=die default=ignore] pam_himmelblau.so ignore_unknown_user
+  tasks:
+    - name: Read the assembled PAM auth and account stacks
+      ansible.builtin.slurp:
+        src: "/etc/pam.d/{{ __pam_file }}"
+      loop:
+        - common-auth
+        - common-account
+      loop_control:
+        loop_var: __pam_file
+      register: __pam_stacks
+
+    # Self-test the detector BEFORE trusting it: it must flag an unsafe blocking line and must NOT
+    # flag a safe (ignore_unknown_user) one. Guards both failure modes — a dead regex that passes
+    # everything (the bug the review board caught) and an over-strict one that rejects safe wiring.
+    - name: Assert the lock-out detector flags unsafe but allows safe wiring
+      ansible.builtin.assert:
+        that:
+          - >-
+            __probe_bad | regex_findall(__block_re)
+            | reject('search', __pass_opt) | list | length == 1
+          - >-
+            __probe_ok | regex_findall(__block_re)
+            | reject('search', __pass_opt) | list | length == 0
+        fail_msg: >-
+          Lock-out detector is broken (unsafe 'required pam_himmelblau' not flagged, or a safe
+          ignore_unknown_user line was). Fix __block_re before trusting the assertions below.
+        quiet: true
+
+    # Same two-way self-test for the bracketed-control detector.
+    - name: Assert the bracketed-control detector flags unsafe but allows the declared control
+      ansible.builtin.assert:
+        that:
+          - __probe_bracket_bad | regex_findall(__bracket_re) | length == 1
+          - not (__probe_bracket_bad is search(__bracket_safe_re))
+          - __probe_bracket_ok | regex_findall(__bracket_re) | length == 1
+          - __probe_bracket_ok is search(__bracket_safe_re)
+          - not (__probe_bracket_ok is search(__bracket_unsafe_re))
+        fail_msg: >-
+          Bracketed-control detector is broken (a default=die control was not recognised as
+          unsafe, or upstream's declared default=ignore control was). Fix __bracket_re /
+          __bracket_safe_re before trusting the assertion below.
+        quiet: true
+
+    # For both the auth and account phases: the local fallback (pam_unix) must remain, and every
+    # blocking pam_himmelblau line must carry ignore_unknown_user (so a down daemon skips, not
+    # blocks, local users). A blocking himmelblau without that pass-through is a lock-out.
+    - name: Assert pam_unix survives and himmelblau never blocks local logins
+      ansible.builtin.assert:
+        that:
+          - "'pam_unix.so' in __stack"
+          - __stack | regex_findall(__block_re) | reject('search', __pass_opt) | list | length == 0
+        fail_msg: >-
+          himmelblau is wired into {{ __item.__pam_file }} with a blocking control and no
+          ignore_unknown_user pass-through — a down daemon could lock out local users.
+          Stack: {{ __stack }}
+        quiet: true
+      loop: "{{ __pam_stacks.results }}"
+      loop_control:
+        loop_var: __item
+        label: "{{ __item.__pam_file }}"
+      vars:
+        __stack: "{{ __item.content | b64decode }}"
+
+    # The bracketed half of the same invariant: every bracketed pam_himmelblau control must send
+    # PAM_IGNORE (what a local/unknown user produces) to the `ignore` action, so a down daemon or
+    # a non-directory user falls through to pam_unix instead of being denied.
+    - name: Assert every bracketed himmelblau control ignores PAM_IGNORE
+      ansible.builtin.assert:
+        that:
+          - __brackets | reject('search', __bracket_safe_re) | list | length == 0
+          - __brackets | select('search', __bracket_unsafe_re) | list | length == 0
+        fail_msg: >-
+          A bracketed pam_himmelblau control in {{ __item.__pam_file }} does not route PAM_IGNORE
+          to 'ignore' — a local user or a down daemon would be denied rather than falling through
+          to pam_unix. Offending line(s): {{ __brackets }}
+        quiet: true
+      loop: "{{ __pam_stacks.results }}"
+      loop_control:
+        loop_var: __item
+        label: "{{ __item.__pam_file }}"
+      vars:
+        __brackets: "{{ __item.content | b64decode | regex_findall(__bracket_re) }}"
+
+    # Sanity: the converge actually wired himmelblau into the auth stack, so the invariant
+    # above is meaningful and not vacuously true on an unwired host.
+    - name: Assert himmelblau was actually wired into common-auth
+      ansible.builtin.assert:
+        that:
+          - "'pam_himmelblau.so' in (__pam_stacks.results[0].content | b64decode)"
+        fail_msg: pam_himmelblau is absent from common-auth — the role wired no PAM to test.
+        quiet: true

@@ -1,0 +1,209 @@
+---
+# Staged rollout: configure_nss / configure_pam OFF on a PRESENT run. This is the
+# pairing the README documents for a deferred reboot on a transactional host — install and render
+# now, wire NSS/PAM after the reboot — and it is the operator's lock-out escape hatch, so "the
+# toggles are honoured" has to be an assertion rather than an assumption. The reboot-contract test
+# runs this shape already but asserts only that the play completes.
+#
+# The property under test: with configure_nss/configure_pam false the role installs and renders but
+# wires NOTHING — /etc/nsswitch.conf is untouched and pam-config knows nothing about himmelblau.
+#
+# NOT under test, deliberately. An earlier draft of this file also pinned the login-scoping guard
+# standing aside when configure_pam is false, reasoning that "when no PAM is being wired
+# there is no login to scope". That reasoning is wrong: scoping lives in the RENDERED CONFIG, and
+# configure.yml renders unconditionally. On a host wired by an earlier run, a converge with
+# configure_pam false and an empty himmelblau_pam_allow_groups rewrites the config to allow-all and
+# restarts the daemon with no guard firing. So this file supplies
+# himmelblau_pam_allow_no_groups explicitly and does not record the stand-aside as intended
+# behaviour — a test that pins a gap as a contract makes the gap harder to close.
+#
+# The completing play ("Complete the rollout") then converges with the toggles on, so the absence
+# asserts in the preceding verify play cannot pass vacuously: something that never wires NSS/PAM at
+# all would fail there, not sail through here. (Plays are referenced by name, not position — an
+# establishing play was inserted once already and the numbering drifted.)
+#
+# Tenant-less (start_services: false). This file establishes its own starting state and asserts
+# nothing about the host it lands on, so it is safe in any position when several tests_*.yml share
+# one tox-lsr VM.
+
+- name: Establish an unwired starting point (this file must not assume a fresh VM)
+  hosts: all
+  become: true
+  vars:
+    himmelblau_state: absent
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Stage the rollout — install and render, wire nothing
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_configure_nss: false
+    himmelblau_configure_pam: false
+    # Supplied explicitly rather than relying on the guard being skipped — see the
+    # header. The staged rollout defers the WIRING; it should not defer the scoping decision.
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify the staged run installed and rendered but wired nothing
+  hosts: all
+  become: true
+  tasks:
+    - name: Read the rendered config
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __staged_conf
+
+    - name: Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Stat /etc/nsswitch.conf
+      ansible.builtin.stat:
+        path: /etc/nsswitch.conf
+      register: __staged_nsswitch_stat
+
+    # The file legitimately may not exist yet: SLE 16 ships nsswitch.conf only under /usr/etc, and
+    # the role seeds /etc from it inside nss.yml — which this run skipped. Absent is therefore a
+    # PASS for "NSS was not wired", and the read below is conditional rather than assumed.
+    - name: Read /etc/nsswitch.conf when it exists
+      ansible.builtin.slurp:
+        src: /etc/nsswitch.conf
+      register: __staged_nsswitch
+      when: __staged_nsswitch_stat.stat.exists
+
+    - name: Query pam-config for himmelblau
+      ansible.builtin.command: pam-config --query --himmelblau
+      register: __staged_pam
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Assert the staged run installed and rendered
+      ansible.builtin.assert:
+        that:
+          - "'domain = example.onmicrosoft.com' in (__staged_conf.content | b64decode)"
+          - "'himmelblau' in ansible_facts.packages"
+        fail_msg: >-
+          The staged run did not do its half of the job: with the wiring toggles off it must still
+          install the packages and render himmelblau.conf.
+        quiet: true
+
+    - name: Assert the staged run wired NOTHING
+      ansible.builtin.assert:
+        that:
+          # NSS: either the file was never seeded, or it exists and carries no himmelblau source.
+          - >-
+            not __staged_nsswitch_stat.stat.exists
+            or 'himmelblau' not in (__staged_nsswitch.content | b64decode)
+          # PAM: pam-config must not know about himmelblau at all.
+          - __staged_pam.stdout | trim | length == 0
+        fail_msg: >-
+          himmelblau_configure_nss/himmelblau_configure_pam were false, but the role wired NSS or
+          PAM anyway. That breaks the documented staged rollout and wires a login path the operator
+          deliberately deferred.
+        quiet: true
+
+    # The staged shape renders himmelblau.conf on a path no other file in the suite converges, so
+    # its idempotency is proven nowhere else. The qemu runner does not double-run, so converge it a
+    # second time here and assert no drift.
+    - name: Snapshot himmelblau.conf before the second staged converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __staged_before
+
+    - name: Converge the staged shape a SECOND time
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: example.onmicrosoft.com
+        himmelblau_configure_nss: false
+        himmelblau_configure_pam: false
+        himmelblau_pam_allow_no_groups: true
+        himmelblau_start_services: false
+
+    - name: Re-stat himmelblau.conf after the second staged converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __staged_after
+
+    - name: Re-probe NSS and PAM after the second staged converge
+      ansible.builtin.stat:
+        path: /etc/nsswitch.conf
+      register: __staged2_nsswitch_stat
+
+    - name: Read /etc/nsswitch.conf after the second staged converge, when it exists
+      ansible.builtin.slurp:
+        src: /etc/nsswitch.conf
+      register: __staged2_nsswitch
+      when: __staged2_nsswitch_stat.stat.exists
+
+    - name: Query pam-config after the second staged converge
+      ansible.builtin.command: pam-config --query --himmelblau
+      register: __staged2_pam
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Assert the staged shape is idempotent AND still wired nothing
+      ansible.builtin.assert:
+        that:
+          - __staged_after.stat.checksum == __staged_before.stat.checksum
+          # The config being byte-identical is not enough. A regression that wires NSS or PAM only
+          # on a RE-converge over an already-installed host — the exact shape an operator meets
+          # when re-running a staged rollout — would leave the config unchanged and still slip
+          # through, because the absence asserts above ran before this converge.
+          - >-
+            not __staged2_nsswitch_stat.stat.exists
+            or 'himmelblau' not in (__staged2_nsswitch.content | b64decode)
+          - __staged2_pam.stdout | trim | length == 0
+        fail_msg: >-
+          A second converge of the staged shape rewrote himmelblau.conf, or wired NSS or PAM that
+          the first staged converge correctly left alone.
+        quiet: true
+
+- name: Complete the rollout — now wire NSS and PAM
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_configure_nss: true
+    himmelblau_configure_pam: true
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify the completing run wired what the staged run withheld
+  hosts: all
+  become: true
+  tasks:
+    - name: Read /etc/nsswitch.conf
+      ansible.builtin.slurp:
+        src: /etc/nsswitch.conf
+      register: __wired_nsswitch
+
+    - name: Query pam-config for himmelblau
+      ansible.builtin.command: pam-config --query --himmelblau
+      register: __wired_pam
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # This is what makes the previous play's absence asserts non-vacuous: the same role, on the
+    # same host, with only the toggles changed, DOES wire both.
+    - name: Assert NSS and PAM are wired once the toggles are on
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' in (__wired_nsswitch.content | b64decode)"
+          - __wired_pam.stdout | trim | length > 0
+        fail_msg: >-
+          Turning the toggles back on did not wire NSS/PAM — so the staged run's "wired nothing"
+          asserts proved nothing about the toggles.
+        quiet: true

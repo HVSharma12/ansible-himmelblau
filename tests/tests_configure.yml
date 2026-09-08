@@ -1,0 +1,134 @@
+---
+# Configure test: full set of options renders correctly and stays idempotent — the second
+# converge is a real gate. Uses a TWO-element pam_allow_groups so the join(',') render
+# path is exercised, and a non-default shell so `shell =` is asserted at value level (not just
+# presence).
+- name: Test himmelblau full configuration
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_app_id: d023f7aa-d214-4b59-911d-6074de623765
+    himmelblau_pam_allow_groups:
+      - f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12
+      - a2b8c6d0-1e2f-4a3b-9c8d-7e6f5a4b3c2d
+    # Two elements so this list's join(',') is exercised too, like pam_allow_groups.
+    # `users` is deliberately benign — test playbooks get copied as examples, so don't model
+    # granting a root-equivalent group (e.g. docker) to every tenant user.
+    himmelblau_local_groups:
+      - wheel
+      - users
+    himmelblau_idmap_range: "300000-2000300000"
+    himmelblau_shell: /bin/zsh
+    himmelblau_home_attr: uuid
+    himmelblau_home_alias: spn
+    himmelblau_home_prefix: /home/
+    himmelblau_logon_token_app_id: a1b2c3d4-0000-0000-0000-000000000000
+    himmelblau_user_map_file: /etc/himmelblau/user-map
+    himmelblau_extra_config:
+      cache_timeout: "300"
+      # A promoted key set ONLY via extra_config (its typed var unset) must still render.
+      local_sudo_group: viaext
+      # Precedence regression: these keys ALSO have their typed var set above, so the
+      # typed value must win and these extra_config twins must be suppressed (not double-rendered).
+      pam_allow_groups: SHOULD-NOT-WIN
+      idmap_range: "999-999"
+      # A YAML boolean must render INI-lowercase (true/false), not Python-cased True/False.
+      enable_experimental_mfa: true
+    # Tenant-less CI: configure but don't start the daemon — it needs a real tenant.
+    himmelblau_start_services: false
+    himmelblau_offline_breakglass_enabled: true
+    himmelblau_offline_breakglass_ttl: 3600
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify configuration content and idempotency
+  hosts: all
+  become: true
+  tasks:
+    - name: Snapshot himmelblau.conf (checksum) before the second converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __conf_before
+
+    # Same anchors as play 1 (play vars don't cross plays; include_role vars must be a dict).
+    - name: Converge a SECOND time to prove idempotency
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: example.onmicrosoft.com
+        himmelblau_app_id: d023f7aa-d214-4b59-911d-6074de623765
+        himmelblau_pam_allow_groups:
+          - f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12
+          - a2b8c6d0-1e2f-4a3b-9c8d-7e6f5a4b3c2d
+        himmelblau_local_groups: [wheel, users]
+        himmelblau_idmap_range: "300000-2000300000"
+        himmelblau_shell: /bin/zsh
+        himmelblau_home_attr: uuid
+        himmelblau_home_alias: spn
+        himmelblau_home_prefix: /home/
+        himmelblau_logon_token_app_id: a1b2c3d4-0000-0000-0000-000000000000
+        himmelblau_user_map_file: /etc/himmelblau/user-map
+        himmelblau_extra_config:
+          cache_timeout: "300"
+          local_sudo_group: viaext
+          pam_allow_groups: SHOULD-NOT-WIN
+          idmap_range: "999-999"
+          enable_experimental_mfa: true
+        himmelblau_start_services: false
+        himmelblau_offline_breakglass_enabled: true
+        himmelblau_offline_breakglass_ttl: 3600
+
+    - name: Re-stat himmelblau.conf after the second converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __conf_after
+
+    - name: Read rendered config
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __conf
+
+    - name: Assert the second converge did not rewrite the config (idempotent)
+      ansible.builtin.assert:
+        that:
+          - __conf_after.stat.checksum == __conf_before.stat.checksum
+        fail_msg: "Second converge rewrote himmelblau.conf — full config is not idempotent."
+        quiet: true
+
+    - name: Assert expected keys are present (value-level, including the two-element join and shell)
+      ansible.builtin.assert:
+        that:
+          - "'domain = example.onmicrosoft.com' in __content"
+          - "'idmap_range = 300000-2000300000' in __content"
+          - "'shell = /bin/zsh' in __content"
+          - "'home_attr = uuid' in __content"
+          - "'home_alias = spn' in __content"
+          - "'home_prefix = /home/' in __content"
+          - "'logon_token_app_id = a1b2c3d4-0000-0000-0000-000000000000' in __content"
+          - "'user_map_file = /etc/himmelblau/user-map' in __content"
+          - "'cache_timeout = 300' in __content"
+          - "'local_sudo_group = viaext' in __content"
+          - "'local_groups = wheel,users' in __content"
+          # Two-element list must render as a comma-joined value (join(',')), exactly once.
+          - "(('pam_allow_groups = ' ~ __g1 ~ ',' ~ __g2) in __content)"
+          - "'[offline_breakglass]' in __content"
+          - "'enabled = true' in __content"
+          - "'ttl = 3600' in __content"
+          # Precedence: the typed var wins and its extra_config twin is suppressed —
+          # the contested keys must render EXACTLY once and never carry the extra_config value.
+          - "'SHOULD-NOT-WIN' not in __content"
+          - "'idmap_range = 999-999' not in __content"
+          - "__content | regex_findall('(?m)^pam_allow_groups =') | length == 1"
+          - "__content | regex_findall('(?m)^idmap_range =') | length == 1"
+          - "__content | regex_findall('(?m)^shell =') | length == 1"
+          # extra_config YAML bool renders INI-lowercase, not Python-cased (True/False).
+          - "'enable_experimental_mfa = true' in __content"
+          - "'enable_experimental_mfa = True' not in __content"
+        quiet: true
+      vars:
+        __content: "{{ __conf.content | b64decode }}"
+        __g1: f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12
+        __g2: a2b8c6d0-1e2f-4a3b-9c8d-7e6f5a4b3c2d

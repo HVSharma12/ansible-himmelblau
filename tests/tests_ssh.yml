@@ -1,0 +1,73 @@
+---
+# SSH enrolment test (opt-in): configure_ssh installs the himmelblau sshd config and
+# the sudo_groups/local_sudo_group keys render. Tenant-less (start_services: false), so
+# sshd is not restarted during CI; the handler is start_services-gated.
+- name: Configure himmelblau with SSH enrolment + sudo groups
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_pam_allow_groups:
+      - f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12
+    himmelblau_configure_ssh: true
+    himmelblau_sudo_groups:
+      - 11111111-2222-3333-4444-555555555555
+    himmelblau_local_sudo_group: wheel
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify SSH enrolment
+  hosts: all
+  become: true
+  tasks:
+    - name: Read rendered config
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __conf
+
+    - name: Check the sshd config package is installed
+      ansible.builtin.package:
+        name: himmelblau-sshd-config
+        state: present
+      check_mode: true
+      register: __sshd_pkg
+
+    - name: Assert sudo keys rendered and sshd config present
+      ansible.builtin.assert:
+        that:
+          - "'sudo_groups = 11111111-2222-3333-4444-555555555555' in __content"
+          - "'local_sudo_group = wheel' in __content"
+          - not __sshd_pkg.changed
+        quiet: true
+      vars:
+        __content: "{{ __conf.content | b64decode }}"
+
+# Teardown after configure_ssh has drifted back to false: absent must still remove
+# himmelblau-sshd-config, not skip ssh.yml and orphan the package.
+- name: Tear down with configure_ssh drifted to false
+  hosts: all
+  become: true
+  vars:
+    himmelblau_state: absent
+    himmelblau_configure_ssh: false
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify SSH teardown removed the sshd config package
+  hosts: all
+  become: true
+  tasks:
+    - name: Probe the sshd config package state
+      ansible.builtin.package:
+        name: himmelblau-sshd-config
+        state: absent
+      check_mode: true
+      register: __sshd_pkg_gone
+
+    - name: Assert the sshd config package is gone despite the drifted toggle
+      ansible.builtin.assert:
+        that:
+          - not __sshd_pkg_gone.changed
+        quiet: true

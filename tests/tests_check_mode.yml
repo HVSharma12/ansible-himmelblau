@@ -1,0 +1,260 @@
+---
+# Check-mode safety on a converged host. The shipped
+# README ("Idempotency and check mode") tells operators a dry run never writes to the host and
+# reports no changes against an already-converged host. That is what this file measures; nothing
+# measured it before.
+#
+# WHAT THIS FILE CAN AND CANNOT PROVE — read before extending it.
+# A playbook cannot fake a real --check run. `check_mode: true` forces every module into check mode,
+# but it does NOT set `ansible_check_mode`: that variable reflects the --check command line only,
+# and no play var, task var, block or include_role var can change it (measured). The role branches
+# on `ansible_check_mode` in tasks/nss.yml and tasks/service.yml, so those branches stay on their
+# real-run side here. On an UNCONVERGED host that matters: the NSS seed cannot really write
+# /etc/nsswitch.conf, the replace that follows then has no file, and the run dies — under a genuine
+# --check the guard skips it instead. Since tox-lsr passes no --check, the unconverged dry run is
+# not testable here and stays a recorded residual.
+#
+# HOW THIS AVOIDS BEING VACUOUS. Re-running the role on a converged host and comparing checksums
+# proves nothing: a real converge is byte-idempotent there too, so the comparison passes whether or
+# not any module honoured check mode. Instead this file DAMAGES each managed file first, in a way a
+# real converge is known to repair, asserts by content that the damage landed, and then asserts the
+# dry run left the damage in place. The repair runs in `always:` and asserts it worked — so damage
+# that turned out not to be repairable fails the leg rather than passing quietly.
+#
+# WHY ONE PLAY. Damage and repair must not be separate plays: a failed host is dropped from the
+# run, so any failure between them would leave the host damaged — and with several tests_*.yml in
+# one tox-lsr invocation, every later file would inherit it. `always:` is what makes the repair
+# unconditional, and `check_mode: true` on a block does propagate into an include_role inside it
+# (measured; the keyword is not valid on include_role itself).
+#
+# Tenant-less (start_services: false). This file converges the state it needs itself and asserts
+# nothing about the host it lands on, so it is safe in any position when several tests_*.yml share
+# one tox-lsr VM.
+
+- name: Converge for real, so there is a converged host to damage and dry-run against
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Damage, dry-run and verify — with the repair guaranteed
+  hosts: all
+  become: true
+  vars_files:
+    - vars/pam_account_control.yml
+  tasks:
+    - name: Damage the managed files, dry-run over them, and prove nothing was written
+      block:
+        # All three damage tasks carry check_mode: false. Without it, a --check invocation would
+        # skip the damage and the by-content assert below would fail — belt and braces, so that
+        # failure mode is impossible rather than merely loud.
+
+        # The template re-renders wholesale, so an added line cannot survive a real converge.
+        - name: Add a sentinel line to himmelblau.conf
+          ansible.builtin.lineinfile:
+            path: /etc/himmelblau/himmelblau.conf
+            line: "# CHECK-MODE SENTINEL — a real converge re-renders this file and drops this line"
+            insertafter: EOF
+          check_mode: false
+
+        # tasks/nss.yml re-appends the token to any database line that lacks it.
+        - name: Strip the himmelblau source from the passwd database
+          ansible.builtin.replace:
+            path: /etc/nsswitch.conf
+            regexp: '^(passwd:.*?)\s+himmelblau\b(.*)$'
+            replace: '\1\2'
+          check_mode: false
+
+        # tasks/pam.yml rewrites `required` to the upstream-declared control, so seeding `required`
+        # is damage the role is designed to repair. `required` is deliberate: it is what pam-config
+        # itself writes, so it denies out-of-group users — unlike `sufficient`, which would be the
+        # login-scoping bypass and must never be left on a host by a failed run.
+        - name: Seed the pam-config `required` account control
+          community.general.pamd:
+            name: common-account
+            type: account
+            control: "[success=ok auth_err=die default=ignore]"
+            module_path: pam_himmelblau.so
+            new_control: required
+          check_mode: false
+
+        - name: Read the damaged files back
+          ansible.builtin.slurp:
+            src: "{{ __src }}"
+          loop:
+            - /etc/himmelblau/himmelblau.conf
+            - /etc/nsswitch.conf
+            - /etc/pam.d/common-account
+          loop_control:
+            loop_var: __src
+          register: __damaged_content
+
+        # Each damage task is a no-op when its pattern does not match, and none fails on a miss.
+        # Without this, a damage that silently did nothing would leave the file converged, the
+        # comparison below would compare it against itself, and the repair assert would be
+        # satisfied by a file that was never damaged — the exact vacuity this file exists to avoid.
+        - name: Assert each damage actually landed, by content
+          ansible.builtin.assert:
+            that:
+              - "'CHECK-MODE SENTINEL' in (__damaged_content.results[0].content | b64decode)"
+              - >-
+                (__damaged_content.results[1].content | b64decode)
+                | regex_search('(?m)^passwd:.*himmelblau') is none
+              - >-
+                (__damaged_content.results[2].content | b64decode)
+                | regex_search(__legacy_ctl_re) is not none
+            fail_msg: >-
+              At least one damage did not land, so the comparison below would compare a converged
+              file against itself and pass without measuring anything.
+            quiet: true
+
+        - name: Checksum the damaged files
+          ansible.builtin.stat:
+            path: "{{ __managed }}"
+            checksum_algorithm: sha256
+            # common-account is a SYMLINK on SLE 16 and stat does not follow links by default —
+            # without this it returns no checksum for that entry at all, and the comparison below
+            # comes out undefined rather than equal.
+            follow: true
+          loop:
+            - /etc/himmelblau/himmelblau.conf
+            - /etc/nsswitch.conf
+            - /etc/pam.d/common-account
+          loop_control:
+            loop_var: __managed
+          register: __damaged
+
+        - name: Assert every damaged file carries a checksum to compare against
+          ansible.builtin.assert:
+            that:
+              - __damaged.results | map(attribute='stat.exists') | list | unique == [true]
+              - >-
+                __damaged.results
+                | map(attribute='stat.checksum', default='') | select('eq', '')
+                | list | length == 0
+            fail_msg: >-
+              A managed file is missing or could not be checksummed, so the comparison below would
+              be vacuous.
+            quiet: true
+
+        # The keyword goes on this inner block: it is not valid on include_role, and it does reach
+        # the role's own tasks from here (measured).
+        - name: Dry-run the role over the damaged host
+          check_mode: true
+          block:
+            # Completing is half the contract: no task may error just because it was told to
+            # preview rather than act. Leaving the damage alone is the other half.
+            - name: Apply the role in check mode
+              ansible.builtin.include_role:
+                name: ansible-himmelblau
+              vars:
+                himmelblau_domain: example.onmicrosoft.com
+                himmelblau_pam_allow_no_groups: true
+                himmelblau_start_services: false
+
+        - name: Re-checksum the managed files after the dry run
+          ansible.builtin.stat:
+            path: "{{ __managed }}"
+            checksum_algorithm: sha256
+            follow: true
+          loop:
+            - /etc/himmelblau/himmelblau.conf
+            - /etc/nsswitch.conf
+            - /etc/pam.d/common-account
+          loop_control:
+            loop_var: __managed
+          register: __after_dry
+
+        # The assertion the whole file exists for, and unlike a plain converged-host comparison it
+        # CAN fail: a module that wrote while in check mode would have repaired the damage and
+        # moved the checksum.
+        - name: Assert the dry run wrote nothing — every file is still damaged
+          ansible.builtin.assert:
+            that:
+              - >-
+                (__after_dry.results | map(attribute='stat.checksum') | list)
+                == (__damaged.results | map(attribute='stat.checksum') | list)
+            fail_msg: >-
+              A check-mode run repaired damage on disk. Every module the role uses must preview
+              rather than write when it is put in check mode.
+            quiet: true
+
+      always:
+        # Unconditional: if anything above failed, the host must still be handed on repaired, or
+        # every later test file in a shared VM inherits the damage.
+        - name: Repair for real
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+
+        - name: Read the repaired files
+          ansible.builtin.slurp:
+            src: "{{ __src }}"
+          loop:
+            - /etc/himmelblau/himmelblau.conf
+            - /etc/nsswitch.conf
+            - /etc/pam.d/common-account
+          loop_control:
+            loop_var: __src
+          register: __repaired
+
+        # Also the non-vacuity proof for the assert above: damage the role cannot repair would sit
+        # unchanged through the dry run for the wrong reason.
+        - name: Assert the real converge undid all three kinds of damage
+          ansible.builtin.assert:
+            that:
+              - "'CHECK-MODE SENTINEL' not in (__repaired.results[0].content | b64decode)"
+              - >-
+                (__repaired.results[1].content | b64decode)
+                | regex_search('(?m)^passwd:.*himmelblau') is not none
+              - >-
+                (__repaired.results[2].content | b64decode)
+                | regex_search(__account_ctl_re) is not none
+            fail_msg: >-
+              The real converge did not repair the damage, so "the dry run changed nothing" proved
+              nothing — the damage was simply not repairable.
+            quiet: true
+
+- name: Guards still refuse a bad config in check mode
+  hosts: all
+  become: true
+  check_mode: true
+  tasks:
+    # A dry run that reports "all fine" on a config the real run would reject is worse than no dry
+    # run at all — the operator learns the misconfiguration only in production. The pre-flight
+    # guards are plain asserts, so they fire in check mode exactly as they do on a real run; this
+    # leg keeps that true.
+    - name: Dry-run the role with a bogus himmelblau_state
+      block:
+        - name: Include the role — should fail at the state enum guard
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_state: prsent
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+
+        - name: Fail the test if the guard did not abort in check mode
+          ansible.builtin.fail:
+            msg: >-
+              The role completed in check mode with an invalid state value. Pre-flight guards must
+              refuse a bad config on a dry run exactly as they do on a real one.
+      rescue:
+        - name: Confirm the abort was the state enum guard
+          ansible.builtin.assert:
+            that:
+              - >-
+                'himmelblau_state must be'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The check-mode run failed, but not at the state enum guard:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true

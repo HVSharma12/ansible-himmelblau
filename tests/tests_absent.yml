@@ -1,0 +1,217 @@
+---
+# Teardown test: deploy, then remove, and verify the host is fully unwired —
+# config gone and NSS clean — no orphaned references to removed modules.
+- name: Deploy himmelblau (present) for the teardown test
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+  # Vacuity guard: prove the wiring actually LANDED before tearing it down. Without
+  # these, every absence assert below passes vacuously on a host the present converge silently
+  # failed to wire (the NSS replace, for one, is a no-op when its regex misses).
+  post_tasks:
+    - name: Snapshot the wired state before teardown
+      ansible.builtin.stat:
+        path: "{{ __pre_path }}"
+      loop:
+        - /etc/himmelblau/himmelblau.conf
+      loop_control:
+        loop_var: __pre_path
+      register: __pre_files
+
+    - name: Read nsswitch.conf before teardown
+      ansible.builtin.slurp:
+        src: /etc/nsswitch.conf
+      register: __pre_nss
+
+    - name: Query pam-config for himmelblau before teardown
+      ansible.builtin.command:
+        cmd: pam-config --query --himmelblau
+      register: __pre_pam
+      changed_when: false
+      # failed_when so a broken profile reaches the vacuity-guard assert message below
+      failed_when: false
+
+    - name: Assert the present converge wired everything the teardown must undo
+      ansible.builtin.assert:
+        that:
+          - __pre_files.results[0].stat.exists
+          - "'himmelblau' in (__pre_nss.content | b64decode)"
+          - __pre_pam.stdout | trim | length > 0
+        fail_msg: >-
+          Present converge did not wire the host (conf/NSS/PAM) — the teardown asserts
+          below would pass vacuously; fix the present path first.
+        quiet: true
+
+# Simulate flag drift between deploy and teardown: the toggles that wired NSS/PAM are now
+# false. Teardown must still fully unwire the host; with the old flag-gated
+# includes this play would leave orphaned nsswitch references and fail the assert below.
+- name: Remove himmelblau (absent, with configure toggles drifted to false)
+  hosts: all
+  become: true
+  vars:
+    himmelblau_state: absent
+    himmelblau_configure_nss: false
+    himmelblau_configure_pam: false
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+# Idempotent teardown: a SECOND absent run — now that the packages and their systemd
+# units are gone — must be a clean no-op. Before the service_facts guard in service.yml, this
+# errored trying to stop units that no longer exist. The play completing is the regression check.
+- name: Remove himmelblau AGAIN (idempotent no-op on an already-torn-down host)
+  hosts: all
+  become: true
+  vars:
+    himmelblau_state: absent
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify teardown is clean
+  hosts: all
+  become: true
+  tasks:
+    - name: Stat the config file
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+      register: __conf
+
+    # Registered names persist for the WHOLE ansible-playbook run and outrank task vars, so a name
+    # this file registers can shadow a same-named local var in another test file when several are
+    # passed to one tox-lsr invocation. Keep register names file-specific.
+    - name: Read nsswitch.conf
+      ansible.builtin.slurp:
+        src: /etc/nsswitch.conf
+      register: __nss_after_teardown
+
+    - name: Assert config removed and NSS unwired
+      ansible.builtin.assert:
+        that:
+          - not __conf.stat.exists
+          - "'himmelblau' not in (__nss_after_teardown.content | b64decode)"
+        quiet: true
+
+    # Orphaned-PAM lock-out class. A regressed absent
+    # branch in tasks/pam.yml would leave pam_himmelblau.so in the assembled stack — invisible to
+    # the config/NSS asserts above. Assert it is gone via pam-config AND in the assembled files.
+    - name: Query himmelblau PAM state after teardown
+      ansible.builtin.command: pam-config --query --himmelblau
+      register: __pam_query
+      changed_when: false
+      failed_when: false
+
+    - name: Read the assembled PAM auth and account stacks after teardown
+      ansible.builtin.slurp:
+        src: "/etc/pam.d/{{ __pam_file }}"
+      loop:
+        - common-auth
+        - common-account
+      loop_control:
+        loop_var: __pam_file
+      register: __pam_stacks
+
+    - name: Assert PAM is fully unwired (no orphaned pam_himmelblau reference)
+      ansible.builtin.assert:
+        that:
+          - (__pam_query.stdout | default('') | trim) | length == 0
+          - "'pam_himmelblau' not in (__pam_stacks.results[0].content | b64decode)"
+          - "'pam_himmelblau' not in (__pam_stacks.results[1].content | b64decode)"
+        fail_msg: >-
+          pam_himmelblau is still referenced after teardown (pam-config query:
+          '{{ __pam_query.stdout | default('') | trim }}') — orphaned PAM wiring, a lock-out risk.
+        quiet: true
+
+    # Package removal (tasks/main.yml removes packages last on absent). Prove they are actually gone
+    # so a regressed install.yml absent branch cannot leave the daemons/NSS/PAM modules installed.
+    - name: Gather installed package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Assert the himmelblau packages were removed — the FULL set, incl. -sso
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' not in ansible_facts.packages"
+          - "'pam-himmelblau' not in ansible_facts.packages"
+          - "'himmelblau-sso' not in ansible_facts.packages"
+        fail_msg: >-
+          himmelblau packages remain after teardown:
+          {{ ['himmelblau', 'pam-himmelblau', 'himmelblau-sso']
+             | select('in', ansible_facts.packages) | list }}
+        quiet: true
+
+    # nss-himmelblau is a virtual capability (the rpm is libnss_himmelblau2 in the base product; ADR
+    # 0029), so a name-based "not in packages" check is ALWAYS vacuously true for it. Ask rpm
+    # whether any installed package still provides the capability instead.
+    - name: Check whether anything still provides nss-himmelblau after teardown
+      ansible.builtin.command: # noqa: command-instead-of-module
+        cmd: rpm -q --whatprovides nss-himmelblau
+      register: __nss_pkg_after
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the NSS module package was removed (via its provides)
+      ansible.builtin.assert:
+        that:
+          - __nss_pkg_after.rc != 0
+        fail_msg: >-
+          An rpm providing nss-himmelblau survived teardown:
+          {{ __nss_pkg_after.stdout | trim }} — the NSS module must be removed on absent.
+        quiet: true
+
+    # Teardown promised "daemons disabled" but had no assert for it. With the
+    # packages gone the unit files must be gone too — is-enabled must fail with unit-not-found for
+    # both daemons (an enabled or even present unit would mean an orphaned service).
+    # noqa on the probes: querying unit-file state needs is-enabled — the systemd module manages
+    # state, and service_facts carries phantom entries for referenced-but-absent units.
+    - name: Probe the daemon unit states after teardown
+      ansible.builtin.command: # noqa: command-instead-of-module
+        cmd: "systemctl is-enabled {{ __unit }}"
+      loop:
+        - himmelblaud.service
+        - himmelblaud-tasks.service
+      loop_control:
+        loop_var: __unit
+      register: __units_after
+      changed_when: false
+      failed_when: false
+
+    - name: Assert no himmelblau daemon unit remains enabled (or present at all)
+      ansible.builtin.assert:
+        that:
+          - __probe.rc != 0
+          - "'enabled' not in __probe.stdout"
+        fail_msg: >-
+          {{ __probe.__unit }} survived teardown (is-enabled: {{ __probe.stdout | trim }}) —
+          orphaned daemon unit.
+        quiet: true
+      loop: "{{ __units_after.results }}"
+      loop_control:
+        loop_var: __probe
+        label: "{{ __probe.__unit }}"
+
+    # Teardown must UNMASK nscd (tasks/nss.yml absent branch) — leaving our mask behind would
+    # silently break the operator's nscd forever. Not-installed is fine; masked is not.
+    - name: Probe nscd's unit-file state after teardown
+      ansible.builtin.command: systemctl is-enabled nscd.service # noqa: command-instead-of-module
+      register: __nscd_after
+      changed_when: false
+      failed_when: false
+
+    - name: Assert nscd was not left masked by the teardown
+      ansible.builtin.assert:
+        that:
+          - "'masked' not in __nscd_after.stdout"
+        fail_msg: >-
+          nscd is still masked after state=absent (is-enabled: {{ __nscd_after.stdout | trim }})
+          — the role's mask must be reverted on teardown.
+        quiet: true
+
+    # No repo-teardown leg: the role adds no repository — the
+    # packages come from the SLE 16.1 base product — so there is nothing for absent to remove.
+    # Asserting the absence of a file the role never creates would be a vacuous pass.

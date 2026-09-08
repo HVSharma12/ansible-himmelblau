@@ -1,0 +1,205 @@
+---
+# OIDC test: generic OIDC mode, which is selected by setting himmelblau_oidc_issuer_url alone —
+# exactly as Himmelblau itself derives it.
+# Covers oidc_issuer_url rendering, the required app_id, the enable_hello
+# knob, domain being optional under OIDC only, and the OIDC render path's
+# own idempotency leg.
+- name: Configure himmelblau for a generic OIDC provider (domain + app_id set)
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: id.example.org
+    himmelblau_oidc_issuer_url: https://id.example.org/realms/corp
+    himmelblau_app_id: 11111111-2222-3333-4444-555555555555
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify OIDC rendering and idempotency
+  hosts: all
+  become: true
+  tasks:
+    - name: Read rendered config
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __conf
+
+    - name: Assert issuer, app_id, domain, and default enable_hello render
+      ansible.builtin.assert:
+        that:
+          - "'oidc_issuer_url = https://id.example.org/realms/corp' in __content"
+          - "'app_id = 11111111-2222-3333-4444-555555555555' in __content"
+          - "'domain = id.example.org' in __content"
+          - "'enable_hello = true' in __content"
+        quiet: true
+      vars:
+        __content: "{{ __conf.content | b64decode }}"
+
+    # The generic-OIDC render path gets its own idempotency leg — the default/configure
+    # legs (tests_default/tests_configure) never render oidc_issuer_url, so a drift bug in this
+    # template branch would escape them.
+    - name: Checksum the OIDC config before the second converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __oidc_before
+
+    - name: Converge the generic-OIDC config a SECOND time
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: id.example.org
+        himmelblau_oidc_issuer_url: https://id.example.org/realms/corp
+        himmelblau_app_id: 11111111-2222-3333-4444-555555555555
+        himmelblau_pam_allow_no_groups: true
+        himmelblau_start_services: false
+
+    - name: Checksum the OIDC config after the second converge
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __oidc_after
+
+    - name: Assert the second OIDC converge was a no-op (idempotent)
+      ansible.builtin.assert:
+        that:
+          - __oidc_after.stat.checksum == __oidc_before.stat.checksum
+          # mtime catches an identical-content rewrite; mode catches attribute churn — both are
+          # invisible to the checksum alone.
+          - __oidc_after.stat.mtime == __oidc_before.stat.mtime
+          - __oidc_after.stat.mode == __oidc_before.stat.mode
+        fail_msg: Second generic-OIDC converge rewrote himmelblau.conf — the path is NOT idempotent.
+        quiet: true
+
+# Domainless OIDC with Hello disabled: domain is optional ONLY under OIDC, because OIDC
+# users need not sign in with a UPN — the issuer is then the identity anchor, so the
+# config must render no `domain =` line, and enable_hello must be false.
+- name: Configure a domainless OIDC provider with Hello disabled
+  hosts: all
+  become: true
+  vars:
+    himmelblau_oidc_issuer_url: https://id.example.org/realms/corp
+    himmelblau_app_id: 11111111-2222-3333-4444-555555555555
+    himmelblau_enable_hello: false
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify domainless + Hello-disabled rendering
+  hosts: all
+  become: true
+  tasks:
+    - name: Read rendered config
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __conf2
+
+    - name: Assert no domain line is emitted and Hello is disabled
+      ansible.builtin.assert:
+        that:
+          - "'domain =' not in __content"
+          - "'enable_hello = false' in __content"
+        quiet: true
+      vars:
+        __content: "{{ __conf2.content | b64decode }}"
+
+# Negative: domain is REQUIRED for Entra — Himmelblau does NOT infer it from the first
+# user's UPN — and the issuer is the only alternative anchor. So neither set must ABORT at the
+# pre-flight anchor guard rather than emit an anchor-less [global] that can authenticate nobody.
+# This is also what retires the old `idp_provider: none` waiver. Tenant-less: the guard
+# is a pre-flight assert, so nothing is installed or changed.
+- name: Anchor guard rejects a config with neither domain nor issuer
+  hosts: all
+  become: true
+  tasks:
+    - name: Run the role with neither domain nor oidc_issuer_url set
+      block:
+        - name: Include the role — should fail at the identity-anchor guard
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+            # deliberately NO himmelblau_domain and NO himmelblau_oidc_issuer_url
+
+        - name: Fail the test if the anchor guard did not abort
+          ansible.builtin.fail:
+            msg: >-
+              Expected the identity-anchor guard to abort (neither domain nor issuer set),
+              but the role completed.
+      rescue:
+        - name: Confirm the abort was the identity-anchor guard (not some other error)
+          ansible.builtin.assert:
+            that:
+              - "'identity anchor' in (ansible_failed_result.msg | default(''))"
+            fail_msg: >-
+              Role failed, but not on the identity-anchor guard. Got:
+              {{ ansible_failed_result.msg | default('(no msg)') }}
+            quiet: true
+
+# Negative: setting an OIDC issuer makes app_id the OIDC client id, so it is required —
+# the missing half must abort at the OIDC-client-id guard. Tenant-less pre-flight.
+- name: IdP guard rejects an OIDC issuer with no app_id
+  hosts: all
+  become: true
+  tasks:
+    - name: Run with the issuer set but app_id empty (expect a guard abort)
+      block:
+        - name: Include the role — should fail at the OIDC-client-id guard
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_oidc_issuer_url: https://id.example.org/realms/corp
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+            # deliberately NO himmelblau_app_id
+
+        - name: Fail the test if the IdP guard did not abort
+          ansible.builtin.fail:
+            msg: "Expected a guard abort (OIDC issuer set, no app_id), but the role completed."
+      rescue:
+        - name: Confirm the abort was the OIDC-client-id guard
+          ansible.builtin.assert:
+            that:
+              - "'OIDC client id' in (ansible_failed_result.msg | default(''))"
+            fail_msg: >-
+              Role failed, but not on the OIDC-client-id guard. Got:
+              {{ ansible_failed_result.msg | default('(no msg)') }}
+            quiet: true
+
+# The minimal Entra shape: a domain alone is a complete identity anchor. app_id is
+# almost never set for Entra — it is needed only for specific cases such as enumerating groups or
+# reading extended attributes — so the Quick start ships domain-only, and this leg holds that shape
+# honest: no `app_id =` and no `oidc_issuer_url =` may appear, while the base keys still render.
+- name: Converge the minimal Entra shape (domain only, no app_id)
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: id.example.org
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Verify the minimal Entra render carries no OIDC or app_id keys
+  hosts: all
+  become: true
+  tasks:
+    - name: Read rendered config
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __conf_min
+
+    - name: Assert the anchor renders but app_id and issuer do not
+      ansible.builtin.assert:
+        that:
+          - "'domain = id.example.org' in __content"
+          - "'oidc_issuer_url =' not in __content"
+          - "'app_id =' not in __content"
+          - "'idmap_range =' in __content"
+          - "'shell =' in __content"
+        quiet: true
+      vars:
+        __content: "{{ __conf_min.content | b64decode }}"

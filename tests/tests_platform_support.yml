@@ -1,0 +1,349 @@
+---
+# Supported-platform contract and the two fail-loud unsupported paths,
+# exercised on the normal SLE 16.1 gate image by shadowing the facts the role dispatches on — the
+# same mechanism the reboot-contract test uses for its injected flag. Six legs:
+#   1. injected SLE 15.6      -> the platform guard refuses with its base-product message.
+#   2. injected SLE 16.0      -> refused too. This is the near-miss the guard exists for: same
+#      distribution, same major version, one minor below the floor. Without it a slip from
+#      `distribution_version is version('16.1', '>=')` to a major-version comparison would admit
+#      every 16.0 host while leg 1 stayed green.
+#   3. injected SLES_SAP 16.1 -> refused likewise; Ansible reports the SAP variant under its own
+#      distribution name, which the guard's allow-list deliberately does not admit.
+#   4. injected SL-Micro 16.1 -> ADMITTED: the guard lets the Immutable variant through and the
+#      converge reaches the render. This leg deliberately asserts ONLY what it produced itself —
+#      see the note on its own assert for why the package set and PAM method cannot be checked
+#      here.
+#   5. a family with no vars file, and __himmelblau_pam_method PINNED to "manual" -> pam.yml must
+#      FAIL LOUDLY rather than silently skip PAM. Note what the pin costs: this leg proves the
+#      refusal and proves the login-scoping guard is gated on the method, but it does NOT prove
+#      that an unsupported family ends up on "manual" — the pin decides that. A separate assert
+#      covers the dispatch half by showing no vars file matches the shadowed facts.
+#   6. the same host with configure_pam off -> ssh.yml must FAIL LOUDLY for the same reason. This
+#      one needs no pin: ssh.yml keys directly on ansible_facts['os_family'], so it is end to end.
+#
+# Legs 1, 2, 3, 5 and 6 are rescued negatives: the contract is that the role REFUSES. Leg 4 is the
+# positive counterweight — without it a typo in the guard's allow-list would refuse the Immutable
+# variant and every remaining leg would still pass.
+#
+# Legs 5 and 6 shadow a family the role has no vars file for, so its first_found dispatch matches
+# nothing (skip: true) — the shape a genuinely unsupported platform has. That alone is NOT enough to
+# leave __himmelblau_pam_method at its vars/main.yml default: include_vars values persist for the
+# WHOLE ansible-playbook run, across plays and across test files, so vars/Suse.yml loaded by any
+# earlier play is still in scope. Neither a play var nor a task var can displace it (both rank below
+# include_vars); include_role vars can, which is why leg 5 pins the method — the same mechanism the
+# reboot-contract test uses for __himmelblau_is_transactional.
+#
+# The dispatch tries distribution FIRST (`<distribution>_<version>.yml`, then `<distribution>.yml`,
+# then `<os_family>.yml`), so os_family is only the last of three chances to match. Adding a
+# vars/SLES.yml later would silently falsify these legs' premise with nothing going red — hence the
+# explicit no-match assert in leg 5.
+#
+# This file establishes everything it needs and asserts nothing about the host it lands on, so it
+# is safe in any position when several tests_*.yml share one tox-lsr VM.
+
+- name: Platform guard leg 1 — a pre-16.1 host is refused with the v1.x pointer
+  hosts: all
+  become: true
+  tasks:
+    - name: Converge against injected SLE 15.6 facts
+      block:
+        - name: Apply the role (expect the supported-platform refusal)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+            # os_family keeps the vars dispatch on Suse.yml; distribution/version make the
+            # platform assert fire. pkg_mgr is not read before the guard and this leg never gets
+            # past it — it is carried only so every leg in this file shadows the same fact set.
+            ansible_facts:
+              distribution: SLES
+              distribution_version: "15.6"
+              os_family: Suse
+              pkg_mgr: zypper
+
+        # Sentinel message deliberately avoids the guard's asserted phrase, so a regression that
+        # lets the role converge cannot satisfy the rescue assert with this sentinel's own text.
+        - name: Fail if the platform guard did not trigger
+          ansible.builtin.fail:
+            msg: >-
+              The role completed against injected SLE 15.6 facts — the platform guard must
+              refuse releases below the supported floor.
+      rescue:
+        # Keys on a distinctive fragment of the guard's own fail_msg in tasks/main.yml — the two
+        # must be edited together. This fragment names the reason (base-product install) rather
+        # than the platform list, which changes as variants are called out.
+        - name: Assert the failure is the platform refusal
+          ansible.builtin.assert:
+            that:
+              - >-
+                'installs Himmelblau from the SLE 16.1 base product'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The converge failed, but not with the platform-guard message:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true
+
+- name: Platform guard leg 2 — SLE 16.0 is refused (the near-miss the floor exists for)
+  hosts: all
+  become: true
+  tasks:
+    - name: Converge against injected SLE 16.0 facts
+      block:
+        - name: Apply the role (expect the supported-platform refusal)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+            # Same distribution and same major version as a supported host — only the minor is
+            # below the floor. Leg 1's 15.6 would still be refused by a major-version comparison;
+            # this one would not, which is the regression this leg exists to catch.
+            ansible_facts:
+              distribution: SLES
+              distribution_version: "16.0"
+              os_family: Suse
+              pkg_mgr: zypper
+
+        - name: Fail if the platform guard did not trigger
+          ansible.builtin.fail:
+            msg: >-
+              The role completed against injected SLE 16.0 facts — Himmelblau is in the base
+              product only from 16.1, so the guard must refuse the release just below the floor.
+      rescue:
+        - name: Assert the failure is the platform refusal
+          ansible.builtin.assert:
+            that:
+              - >-
+                'installs Himmelblau from the SLE 16.1 base product'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The converge failed, but not with the platform-guard message:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true
+
+- name: Platform guard leg 3 — the SAP variant is refused, not silently admitted
+  hosts: all
+  become: true
+  tasks:
+    - name: Converge against injected SLES_SAP 16.1 facts
+      block:
+        - name: Apply the role (expect the supported-platform refusal)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_no_groups: true
+            himmelblau_start_services: false
+            # The release is new enough; it is the distribution NAME the guard does not admit. The
+            # README says these variants are untested rather than known-broken, and this pins that
+            # they are refused rather than quietly treated as SLES.
+            ansible_facts:
+              distribution: SLES_SAP
+              distribution_version: "16.1"
+              os_family: Suse
+              pkg_mgr: zypper
+
+        - name: Fail if the platform guard did not trigger
+          ansible.builtin.fail:
+            msg: >-
+              The role completed against injected SLES_SAP facts — the guard's allow-list names
+              only SLES and SL-Micro, so the SAP variant must be refused.
+      rescue:
+        - name: Assert the failure is the platform refusal
+          ansible.builtin.assert:
+            that:
+              - >-
+                'installs Himmelblau from the SLE 16.1 base product'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The converge failed, but not with the platform-guard message:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true
+
+# The positive counterweight to legs 1/2/3 and 5/6. The Immutable variant is admitted,
+# and Ansible reports it as SL-Micro; nothing proved that until now, so an allow-list typo would
+# have refused every Immutable host while CI stayed green.
+- name: Platform guard leg 4 — SL-Micro 16.1 is ADMITTED and reaches the render
+  hosts: all
+  become: true
+  tasks:
+    # The include_role below is NOT rescued: if the guard's allow-list stopped admitting SL-Micro,
+    # the platform assert would abort the play. That is this leg's primary contract.
+    - name: Converge against injected SL-Micro 16.1 facts
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        # A domain unique to this leg. Every other test file converges the same host with
+        # example.onmicrosoft.com, so asserting that value would be satisfied by whatever ran
+        # before — this one can only have been written by the converge above. Nothing needs
+        # restoring afterwards: legs 5 and 6 below re-render with the shared domain (configure.yml
+        # runs before the pam.yml/ssh.yml aborts), and no test file reads that value without
+        # converging it itself.
+        himmelblau_domain: slmicro.onmicrosoft.com
+        himmelblau_pam_allow_no_groups: true
+        himmelblau_start_services: false
+        # No vars/SL-Micro.yml exists and none is needed: the first_found dispatch falls through
+        # to the os_family file, which is the whole reason SL-Micro needs no distro file of its own.
+        ansible_facts:
+          distribution: SL-Micro
+          distribution_version: "16.1"
+          os_family: Suse
+          pkg_mgr: zypper
+
+    - name: Read the config rendered for the Immutable variant
+      ansible.builtin.slurp:
+        src: /etc/himmelblau/himmelblau.conf
+      register: __slmicro_conf
+
+    # NOTE on what is deliberately NOT asserted here. The obvious extra proofs that vars/Suse.yml
+    # resolved — himmelblau-sso installed, pam-config wired — cannot be trusted in this file. Every
+    # preceding test converges this same host as SUSE, and include_vars values persist for the whole
+    # ansible-playbook run, so both would already be true no matter what this leg's own dispatch
+    # did. Asserting them would look stronger and prove less. Guard admission (above) plus a render
+    # this leg alone could have produced is what is actually verifiable here.
+    - name: Assert the guard admitted SL-Micro and the converge reached the render
+      ansible.builtin.assert:
+        that:
+          - "'domain = slmicro.onmicrosoft.com' in (__slmicro_conf.content | b64decode)"
+        fail_msg: >-
+          SL-Micro 16.1 did not reach the config render — the platform guard must admit the
+          Immutable variant.
+        quiet: true
+
+- name: Unsupported PAM method leg 5 — pam.yml must fail loudly, not skip
+  hosts: all
+  become: true
+  tasks:
+    # The dispatch half of this leg's premise, proven directly rather than assumed: none of the
+    # three files first_found would try exists, so a real host with these facts would fall through
+    # to vars/main.yml. The pin below then supplies that value regardless of what earlier plays
+    # leaked, which is what makes the refusal reachable — but only this assert shows the
+    # fall-through is real. tests/roles/<role> is the self-symlink, so this resolves to the
+    # role's own vars/.
+    - name: Assert no vars file matches the shadowed platform
+      ansible.builtin.assert:
+        that:
+          - >-
+            query('first_found',
+                  {'files': ['SLES_16.1.yml', 'SLES.yml', 'RedHat.yml'],
+                   'paths': [__vars_dir], 'skip': true}) | length == 0
+          # Positive control, and the reason this assert is not self-satisfying: playbook_dir is
+          # the PLAYBOOK's directory, not the role's, so a path that stops resolving returns []
+          # — exactly what the condition above asserts. Requiring the same lookup to find
+          # Suse.yml makes a broken path fail loudly instead of confirming the premise.
+          - >-
+            query('first_found',
+                  {'files': ['Suse.yml'], 'paths': [__vars_dir], 'skip': true}) | length == 1
+        fail_msg: >-
+          Either a vars file now matches these shadowed facts — so the role would no longer fall
+          through to vars/main.yml and this leg's premise is false — or {{ __vars_dir }} is not the
+          role's vars directory, in which case the no-match check above proved nothing.
+        quiet: true
+      vars:
+        __vars_dir: "{{ playbook_dir }}/roles/ansible-himmelblau/vars"
+
+    - name: Converge on a family with no vars file, with the PAM method pinned to "manual"
+      block:
+        - name: Apply the role (expect the PAM-method refusal)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_start_services: false
+            # NSS wiring off so the leg stops at pam.yml rather than editing nsswitch on the way.
+            himmelblau_configure_nss: false
+            # An already-installed package, so install.yml is a genuine no-op: this leg is about
+            # the PAM refusal, not about dragging in a package set. This is also the only coverage
+            # the himmelblau_packages override has.
+            himmelblau_packages:
+              - bash
+            # The method a platform with no vars file gets. PINNED, not inherited: an earlier
+            # play's include_vars of vars/Suse.yml survives into this one (see the header) and
+            # would otherwise leave this at "pam-config", firing the login-scoping guard first and
+            # hiding the refusal this leg exists to prove. Because it is pinned, this leg does not
+            # prove that an unsupported family GETS "manual" — the assert above covers that half.
+            __himmelblau_pam_method: manual
+            # distribution/version keep the platform guard satisfied; os_family is what steers the
+            # vars dispatch, and there is no vars/RedHat.yml, so the dispatch matches nothing.
+            # pkg_mgr must be shadowed too — ansible.builtin.package picks its backend from that
+            # fact, and a wholesale ansible_facts shadow would otherwise remove it.
+            ansible_facts:
+              distribution: SLES
+              distribution_version: "16.1"
+              os_family: RedHat
+              pkg_mgr: zypper
+
+        - name: Fail if the PAM-method guard did not trigger
+          ansible.builtin.fail:
+            msg: >-
+              The role completed with no pam-config method available. Wiring PAM is a security
+              step: it must abort loudly rather than no-op, or an operator believes login is
+              scoped when nothing was configured.
+      rescue:
+        - name: Assert the failure is the PAM-method refusal
+          ansible.builtin.assert:
+            that:
+              - >-
+                'only implemented via pam-config'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The converge failed, but not with the PAM-method message:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true
+
+        # The login-scoping guard is gated on the method being pam-config, so on this host it must
+        # stand aside and let the clearer error above surface. Neither pam_allow_groups nor
+        # pam_allow_no_groups was set, so if that gate regressed the run would have aborted with
+        # "unscoped login" instead — which the assert above would have caught.
+        - name: Assert the login-scoping guard stood aside rather than aborting first
+          ansible.builtin.assert:
+            that:
+              - "'unscoped login' not in (ansible_failed_result.msg | default(''))"
+            fail_msg: >-
+              The login-scoping guard fired on a platform where PAM wiring is unsupported. It is
+              gated on __himmelblau_pam_method so the clearer pam.yml error surfaces instead.
+            quiet: true
+
+- name: Unsupported SSH platform leg 6 — ssh.yml must fail loudly, not skip
+  hosts: all
+  become: true
+  tasks:
+    - name: Converge the same host with PAM off so the run reaches ssh.yml
+      block:
+        - name: Apply the role with SSH enrolment opted in (expect the SSH refusal)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_start_services: false
+            himmelblau_configure_nss: false
+            # PAM off, or leg 5's refusal fires first and this leg never reaches ssh.yml.
+            himmelblau_configure_pam: false
+            himmelblau_configure_ssh: true
+            himmelblau_packages:
+              - bash
+            ansible_facts:
+              distribution: SLES
+              distribution_version: "16.1"
+              os_family: RedHat
+              pkg_mgr: zypper
+
+        - name: Fail if the SSH-platform guard did not trigger
+          ansible.builtin.fail:
+            msg: >-
+              The role completed with configure_ssh opted in on a family it cannot wire. Enabling
+              SSH auth is security-relevant, so it must abort rather than silently no-op.
+      rescue:
+        - name: Assert the failure is the SSH-platform refusal
+          ansible.builtin.assert:
+            that:
+              - >-
+                'only implemented for SUSE'
+                in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              The converge failed, but not with the SSH-platform message:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true

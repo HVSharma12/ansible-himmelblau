@@ -1,0 +1,6 @@
+---
+# tests/vars/pam_account_control.yml — the account-control contract, defined once.
+# Loaded via vars_files by tests_default.yml and tests_pam_account_control.yml, so the control
+# string the role writes in tasks/pam.yml is pinned in exactly one place.
+__account_ctl_re: 'account\s+\[success=ok auth_err=die default=ignore\]\s+pam_himmelblau'
+__legacy_ctl_re: 'account\s+(required|sufficient)\s+pam_himmelblau'

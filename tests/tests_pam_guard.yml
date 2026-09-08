@@ -1,0 +1,50 @@
+---
+# Negative test: the role MUST refuse to wire PAM when login is unscoped. An admin group
+# alone (local_groups/sudo_groups) does NOT scope login, so it must not satisfy the guard. The guard
+# is a pre-flight assert, so the role aborts before any package/NSS/PAM change — tenant-less.
+- name: PAM login-scoping guard refuses admin-group-only deploys
+  hosts: all
+  become: true
+  tasks:
+    - name: Run the role with only an admin group set (expect a guard abort)
+      block:
+        - name: Include the role — should fail at the login-scoping guard
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_local_groups: [wheel]
+            himmelblau_start_services: false
+            # deliberately NO pam_allow_groups and NO pam_allow_no_groups
+
+        - name: Fail the test if the guard did not abort
+          ansible.builtin.fail:
+            msg: "Expected the PAM login-scoping guard to abort the run, but the role completed."
+      rescue:
+        - name: Confirm the abort was the login-scoping guard (not some other error)
+          ansible.builtin.assert:
+            # On SUSE (__himmelblau_pam_method == pam-config) the pre-flight login-scoping guard
+            # fires ('unscoped login'). On a non-pam-config platform PAM wiring is unsupported and
+            # pam.yml aborts first with 'only implemented via pam-config' — either way the role
+            # refused to wire unsafe PAM, which is what this negative test asserts.
+            that:
+              - >-
+                'unscoped login' in (ansible_failed_result.msg | default(''))
+                or 'only implemented via pam-config' in (ansible_failed_result.msg | default(''))
+            fail_msg: >-
+              Role failed, but not on the login-scoping guard or the unsupported-PAM-method
+              abort. Got: {{ ansible_failed_result.msg | default('(no msg)') }}
+            quiet: true
+
+# Positive control: an explicit allow-all opt-in satisfies the guard. This is a deliberate FULL
+# converge (install from the base product) — not tenant-less like the negative leg — so it also
+# proves the guard lets a valid opt-in proceed end to end. Needs the target registered with SCC.
+- name: Explicit pam_allow_no_groups satisfies the guard
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: example.onmicrosoft.com
+    himmelblau_pam_allow_no_groups: true
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
