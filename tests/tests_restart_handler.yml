@@ -1,0 +1,409 @@
+---
+# The Restart himmelblau handler must skip units that are not live. Reported by SUSE QA
+# against the packaged role: `ansible-playbook --check` on a host the role had never converged
+# ended failed=1 at RUNNING HANDLER [Restart himmelblau] — "Could not find the requested service
+# himmelblaud" — because check mode never installed the units and the handler restarted them
+# unconditionally. tasks/service.yml already gathered service_facts in exactly that case and
+# skipped missing units; the handler did not. The same missing guard also killed a REAL converge
+# on a transactional host with the reboot deferred (the staged units are not live until the
+# reboot) — the staged-rollout shape the README documents. Both were measured before the fix on a
+# registered SLE 16.1 VM, with the exact message above.
+#
+# Why nothing caught it: every other tests_*.yml sets himmelblau_start_services: false because
+# the daemons need a reachable tenant, and that is the handler's own gate, so the
+# handler had never executed in CI in any mode. This file leaves start_services at true exactly
+# where the guard must SKIP or merely PREVIEW — so nothing ever tries to start a daemon, and the
+# file stays tenant-less.
+#
+# Four legs, after an establishing teardown:
+#   1. THE REPORTED SCENARIO. ansible_check_mode reflects the --check command line only — no play,
+#      task or include_role var can set it — so the reporter's playbook is run
+#      INSIDE the VM, with --check on the real command line, under the ansible SLE 16.1 ships
+#      (tests/tasks/setup_nested_ansible.yml). It must complete failed=0, and the handler must be
+#      REACHED and skip both units — asserted on the run's own output, so a role that stopped
+#      notifying (or never reached the flush) cannot pass this leg by accident.
+#   2. DEFERRED REBOOT ON A TRANSACTIONAL HOST — a real run, no check mode anywhere. The flag is
+#      injected through include_role vars, never play vars, and himmelblau_packages
+#      points at a package that is already installed: the package task reports ok, so nothing is
+#      installed (the units stay absent, which IS the deferred-reboot state) and the staged-reboot
+#      include, keyed on a changed result, cannot pre-empt the handler. The premise is asserted
+#      first; the play surviving an explicit flush_handlers is the contract.
+#   3. A real converge (start_services false), so the units exist for leg 4.
+#   4. A DRY RUN ON A CONVERGED HOST STILL PREVIEWS THE RESTART — the trade kept when service.yml
+#      was guarded, and the reason the guard is an existence check rather than a bare
+#      `not ansible_check_mode`. Run with a different domain so the render is a change and the
+#      handler is notified; both units must report changed after the handler marker, and nothing
+#      may actually restart (the daemons are enabled but stopped, and stay so).
+#
+# Self-establishing, so it is safe in any position when several tests_*.yml share one tox-lsr VM.
+# It needs the ordinary (non-transactional) SLES 16.1 gate VM: the nested ansible
+# install must be live, and on the Immutable variant a genuine dry run would stop at the reboot
+# contract before the handler — leg 1 asserts that premise. Leg 2 injects the transactional flag
+# on this same host, which is the point. It leaves ansible-core and ansible installed in the VM;
+# nothing later depends on their absence.
+
+- name: Establish a never-converged starting point (this file must not assume a fresh VM)
+  hosts: all
+  become: true
+  vars:
+    himmelblau_state: absent
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Leg 1 — the reported dry run on a never-converged host completes and skips the restart
+  hosts: all
+  become: true
+  vars:
+    __nested_dir: /root/himmelblau-check
+    __restart_handler_marker: "RUNNING HANDLER [ansible-himmelblau : Restart himmelblau]"
+  tasks:
+    # The reporter's own note: on a host previously used for this role, stale unit files can mask
+    # the failure — reload systemd before measuring, then prove the units are unknown.
+    - name: Reload systemd so no stale unit file masks anything
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Gather package facts (leg 1's premise, not an assumption)
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Stat the config the role renders
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+      register: __restart_conf_before
+
+    - name: Assert the host is unconverged — no package, no unit, no config
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' not in ansible_facts.packages"
+          - "'himmelblaud.service' not in ansible_facts.services"
+          - not __restart_conf_before.stat.exists
+        fail_msg: >-
+          The establishing teardown did not leave a never-converged host, so this leg would be
+          measuring the control (an installed host) rather than the reported bug.
+        quiet: true
+
+    # The establishing play ran the role's own detection, so the flag is a host fact here. On a
+    # transactional host the nested ansible install would only be staged, and a genuine dry run
+    # would stop at the reboot contract before ever reaching the handler — a failure for a reason
+    # this file is not about.
+    - name: Assert the host is not transactional (the nested ansible install must be live)
+      ansible.builtin.assert:
+        that:
+          - not (__himmelblau_is_transactional | d(false))
+        fail_msg: >-
+          This file needs the ordinary SLES 16.1 gate VM. On a transactional host the packages the
+          nested run needs would be staged rather than installed, and the dry run would hit the
+          reboot contract instead of the handler.
+        quiet: true
+
+    - name: Set up the nested ansible run
+      ansible.builtin.include_tasks: tasks/setup_nested_ansible.yml
+
+    - name: Run the reported playbook with --check on the real command line
+      ansible.builtin.command:
+        cmd: ansible-playbook -i localhost, --connection local --check --diff play.yml
+        chdir: "{{ __nested_dir }}"
+      environment:
+        ANSIBLE_ROLES_PATH: "{{ __nested_dir }}/roles"
+        # The asserts below read the default callback's per-item lines, so pin the settings they
+        # depend on rather than trust whatever ansible.cfg the image carries.
+        ANSIBLE_STDOUT_CALLBACK: default
+        ANSIBLE_DISPLAY_SKIPPED_HOSTS: "1"
+        ANSIBLE_FORCE_COLOR: "0"
+        ANSIBLE_NOCOLOR: "1"
+      register: __restart_dry_unconverged
+      changed_when: false
+      failed_when: false
+
+    - name: Show the end of the dry run
+      ansible.builtin.debug:
+        msg: "{{ __restart_dry_unconverged.stdout_lines[-15:] }}"
+
+    - name: Re-stat the config after the dry run
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+      register: __restart_conf_after_dry
+
+    # rc alone is not enough: the handler must have been REACHED (the render notified it) and then
+    # skipped both units — otherwise a role that stopped notifying would pass this leg for the
+    # wrong reason. The tail after the handler banner is where its per-item lines are.
+    # The skip lines read the same whichever `when:` clause produced them, so this leg alone cannot
+    # tell the existence guard from a disarmed handler (start_services false). Leg 4 is what pins
+    # that the handler RUNS under the same nested defaults — do not weaken leg 4 believing this
+    # leg covers the guard on its own.
+    - name: Assert the dry run completed and the handler skipped the missing units
+      ansible.builtin.assert:
+        that:
+          - __restart_dry_unconverged.rc == 0
+          - "'failed=0' in __restart_dry_unconverged.stdout"
+          - __restart_handler_marker in __restart_dry_unconverged.stdout
+          - >-
+            'skipping: [localhost] => (item=himmelblaud)'
+            in (__restart_dry_unconverged.stdout.split(__restart_handler_marker) | last)
+          - >-
+            'skipping: [localhost] => (item=himmelblaud-tasks)'
+            in (__restart_dry_unconverged.stdout.split(__restart_handler_marker) | last)
+          - "'Could not find the requested service' not in __restart_dry_unconverged.stdout"
+          - not __restart_conf_after_dry.stat.exists
+        fail_msg: >-
+          The reported scenario is back, or the leg lost its premise
+          (rc={{ __restart_dry_unconverged.rc }}). A dry run on a never-converged host must
+          complete, reach the restart handler, skip the units that do not exist, and write nothing.
+        quiet: true
+
+- name: Leg 2 — deferred reboot on a transactional host, real run, daemons at their default
+  hosts: all
+  become: true
+  tasks:
+    - name: Gather package facts (leg 2's premise)
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Stat the config
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+      register: __restart_conf_pre_txn
+
+    # The stand-in must already be installed and never removable by the role, so the package task
+    # is a clean ok: `filesystem` is on every SUSE host.
+    - name: Assert the premise — units absent, config absent, stand-in package installed
+      ansible.builtin.assert:
+        that:
+          - "'himmelblau' not in ansible_facts.packages"
+          - "'himmelblaud.service' not in ansible_facts.services"
+          - not __restart_conf_pre_txn.stat.exists
+          - "'filesystem' in ansible_facts.packages"
+        fail_msg: >-
+          Premise broken: this leg needs a host with no himmelblau units and no rendered config (so
+          the render is a change that notifies the handler) and an installed stand-in package (so
+          the install reports ok and the reboot contract stays out of the way).
+        quiet: true
+
+    # THE FLAG GOES THROUGH include_role VARS, NEVER PLAY VARS: the establishing play pinned
+    # __himmelblau_is_transactional as a host fact via set_fact, which outranks play vars; role
+    # params outrank set_fact, measured. himmelblau_start_services is explicit because
+    # it is the variable under test — the handler is gated on it, and every other test sets it
+    # false. The wiring toggles are the pairing the README documents for a deferred reboot.
+    - name: Converge as a transactional host whose staged units are not live yet
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: example.onmicrosoft.com
+        # Scoped, like every other leg here, so the suite never renders an unscoped config even
+        # transiently; the render is a change either way.
+        himmelblau_pam_allow_groups:
+          - "11111111-1111-1111-1111-111111111111"
+        himmelblau_configure_nss: false
+        himmelblau_configure_pam: false
+        himmelblau_transactional_update_reboot_ok: false
+        himmelblau_start_services: true
+        himmelblau_packages:
+          - filesystem
+        __himmelblau_is_transactional: true
+
+    # Handlers normally flush at the end of the play; flush here so the asserts below run after the
+    # handler has had its chance to fail, and a failure — if it comes back — is attributed to this
+    # leg rather than to the end of the play.
+    - name: Flush handlers — this is where the pre-fix role died
+      ansible.builtin.meta: flush_handlers
+
+    - name: Stat the rendered config
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __restart_conf_txn
+
+    - name: Re-gather service facts
+      ansible.builtin.service_facts:
+
+    # The config existing proves the render happened, so the handler WAS notified; the units still
+    # being unknown proves the guard skipped rather than found something to restart.
+    - name: Assert the run completed with the handler notified and the units still absent
+      ansible.builtin.assert:
+        that:
+          - __restart_conf_txn.stat.exists
+          - "'himmelblaud.service' not in ansible_facts.services"
+        fail_msg: >-
+          Either the render did not happen (so the handler was never notified and this leg proved
+          nothing) or a unit appeared where none should — the stand-in package no longer
+          reproduces the deferred-reboot state.
+        quiet: true
+
+    # This shape converges nowhere else in the suite; prove it is idempotent too — the qemu runner
+    # does not double-run.
+    - name: Converge the same shape a second time
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: example.onmicrosoft.com
+        himmelblau_pam_allow_groups:
+          - "11111111-1111-1111-1111-111111111111"
+        himmelblau_configure_nss: false
+        himmelblau_configure_pam: false
+        himmelblau_transactional_update_reboot_ok: false
+        himmelblau_start_services: true
+        himmelblau_packages:
+          - filesystem
+        __himmelblau_is_transactional: true
+
+    - name: Flush handlers after the second converge
+      ansible.builtin.meta: flush_handlers
+
+    - name: Re-stat the config
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __restart_conf_txn2
+
+    - name: Assert the second converge changed nothing
+      ansible.builtin.assert:
+        that:
+          - __restart_conf_txn2.stat.checksum == __restart_conf_txn.stat.checksum
+        fail_msg: A second converge of the deferred-reboot shape rewrote himmelblau.conf.
+        quiet: true
+
+# start_services false: the daemons need a reachable tenant to initialise, and this VM
+# has none. The units still get installed and enabled, which is all leg 4 needs.
+- name: Leg 3 — converge for real so the units exist
+  hosts: all
+  become: true
+  vars:
+    himmelblau_domain: test.onmicrosoft.com
+    himmelblau_pam_allow_groups:
+      - "11111111-1111-1111-1111-111111111111"
+    himmelblau_start_services: false
+  roles:
+    - role: ansible-himmelblau
+
+- name: Leg 4 — a dry run on a converged host still previews the restart
+  hosts: all
+  become: true
+  vars:
+    __nested_dir: /root/himmelblau-check
+    __restart_handler_marker: "RUNNING HANDLER [ansible-himmelblau : Restart himmelblau]"
+  tasks:
+    - name: Gather service facts (leg 4's premise)
+      ansible.builtin.service_facts:
+
+    - name: Assert the units exist now and the daemons are not running
+      ansible.builtin.assert:
+        that:
+          - "'himmelblaud.service' in ansible_facts.services"
+          - ansible_facts.services['himmelblaud.service'].state != 'running'
+        fail_msg: >-
+          Leg 3 did not leave the units installed and stopped, so a previewed restart here would
+          prove nothing — or a real one would need a tenant.
+        quiet: true
+
+    - name: Set up the nested ansible run (idempotent)
+      ansible.builtin.include_tasks: tasks/setup_nested_ansible.yml
+
+    # "Not running" cannot tell never-started from started-and-exited: a tenant-less himmelblaud
+    # exits at once, so a restart that really happened could still leave the unit
+    # stopped. systemd's own counters can tell: snapshot the last-start timestamp and restart count
+    # of both units, and the rendered config's checksum, and require all of them unchanged after
+    # the dry run. `systemctl show` is a read-only query; the systemd module cannot ask for a unit's
+    # properties without also being given something to manage, hence the noqa.
+    - name: Snapshot systemd's start counters for both units
+      ansible.builtin.command: # noqa: command-instead-of-module
+        cmd: systemctl show -p ExecMainStartTimestampMonotonic -p NRestarts --value {{ __unit }}
+      loop:
+        - himmelblaud.service
+        - himmelblaud-tasks.service
+      loop_control:
+        loop_var: __unit
+      register: __restart_counters_before
+      changed_when: false
+      check_mode: false
+
+    - name: Checksum the rendered config before the dry run
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __restart_conf_before_dry_converged
+
+    # A different domain makes the render a change, so the handler is notified. Extra vars outrank
+    # the playbook's own vars. start_services stays at the reported default (true): on this
+    # converged host that makes the dry run PREVIEW a start and a restart, never perform them.
+    # Leg 1's skip is attributable to the guard only because this leg proves the same handler,
+    # under the same play defaults, does run once the units exist.
+    - name: Dry-run the reported playbook with a changed domain on the converged host
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook -i localhost, --connection local --check --diff
+          -e himmelblau_domain=changed.onmicrosoft.com play.yml
+        chdir: "{{ __nested_dir }}"
+      environment:
+        ANSIBLE_ROLES_PATH: "{{ __nested_dir }}/roles"
+        # The asserts below read the default callback's per-item lines, so pin the settings they
+        # depend on rather than trust whatever ansible.cfg the image carries.
+        ANSIBLE_STDOUT_CALLBACK: default
+        ANSIBLE_DISPLAY_SKIPPED_HOSTS: "1"
+        ANSIBLE_FORCE_COLOR: "0"
+        ANSIBLE_NOCOLOR: "1"
+      register: __restart_dry_converged
+      changed_when: false
+      failed_when: false
+
+    - name: Show the end of the dry run
+      ansible.builtin.debug:
+        msg: "{{ __restart_dry_converged.stdout_lines[-15:] }}"
+
+    - name: Re-gather service facts after the dry run
+      ansible.builtin.service_facts:
+
+    - name: Re-read systemd's start counters after the dry run
+      ansible.builtin.command: # noqa: command-instead-of-module
+        cmd: systemctl show -p ExecMainStartTimestampMonotonic -p NRestarts --value {{ __unit }}
+      loop:
+        - himmelblaud.service
+        - himmelblaud-tasks.service
+      loop_control:
+        loop_var: __unit
+      register: __restart_counters_after
+      changed_when: false
+      check_mode: false
+
+    - name: Re-checksum the rendered config after the dry run
+      ansible.builtin.stat:
+        path: /etc/himmelblau/himmelblau.conf
+        checksum_algorithm: sha256
+      register: __restart_conf_after_dry_converged
+
+    - name: Assert the dry run previewed the restart of both units and performed nothing
+      ansible.builtin.assert:
+        that:
+          - __restart_dry_converged.rc == 0
+          - "'failed=0' in __restart_dry_converged.stdout"
+          - __restart_handler_marker in __restart_dry_converged.stdout
+          - >-
+            'changed: [localhost] => (item=himmelblaud)'
+            in (__restart_dry_converged.stdout.split(__restart_handler_marker) | last)
+          - >-
+            'changed: [localhost] => (item=himmelblaud-tasks)'
+            in (__restart_dry_converged.stdout.split(__restart_handler_marker) | last)
+          - ansible_facts.services['himmelblaud.service'].state != 'running'
+          - >-
+            (__restart_counters_after.results | map(attribute='stdout') | list)
+            == (__restart_counters_before.results | map(attribute='stdout') | list)
+          - >-
+            __restart_conf_after_dry_converged.stat.checksum
+            == __restart_conf_before_dry_converged.stat.checksum
+        fail_msg: >-
+          On an already-converged host a dry run must still report the restart a real run would
+          perform (rc={{ __restart_dry_converged.rc }}), and must perform nothing: no unit start or
+          restart counted by systemd, and no byte of the config rewritten.
+        quiet: true
+
+    - name: Remove the nested run's tree
+      ansible.builtin.file:
+        path: "{{ __nested_dir }}"
+        state: absent

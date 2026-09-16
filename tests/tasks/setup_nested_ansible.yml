@@ -1,0 +1,70 @@
+---
+# tests/tasks/setup_nested_ansible.yml — give the VM its own ansible, so a test can run
+# `ansible-playbook --check` ON the managed host. Included by tests_restart_handler.yml;
+# the caller sets __nested_dir.
+#
+# Why nested: ansible_check_mode reflects the --check command line only — no play, task or
+# include_role var can set it — so the only faithful test of a dry run is a real one.
+# Running it inside the VM also exercises the role under the ansible the managed platform ships.
+# On a registered SLES 16.1 the base product carries ansible-core and the `ansible` bundle
+# (community.general included, which the zypper backend and pam.yml need), so the registered image
+# the suite already requires is the only prerequisite — no Galaxy, nothing copied from the
+# controller's collection path. Non-transactional hosts only: on the Immutable variant the package
+# task would stage the install into the next snapshot and ansible-playbook would not be on the
+# live root, so the caller asserts the host is not transactional before including this.
+#
+# Idempotent: safe to include more than once in a run.
+
+- name: Install the SLE-shipped ansible inside the VM
+  ansible.builtin.package:
+    name:
+      - ansible-core
+      - ansible
+    state: present
+
+- name: Create the nested run's tree
+  ansible.builtin.file:
+    path: "{{ __nested_dir }}/roles/ansible-himmelblau"
+    state: directory
+    mode: "0755"
+
+# The role under test, copied from the LSR self-symlink beside the test playbooks
+# (tests/roles/ansible-himmelblau -> ../..) — only the directories the role executes from, never
+# .tox or run artifacts.
+- name: Copy the role into the VM
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/roles/ansible-himmelblau/{{ __role_dir }}/"
+    dest: "{{ __nested_dir }}/roles/ansible-himmelblau/{{ __role_dir }}/"
+    mode: preserve
+  loop:
+    - defaults
+    - handlers
+    - meta
+    - tasks
+    - templates
+    - vars
+  loop_control:
+    loop_var: __role_dir
+
+# The bug report's playbook, as reported: hosts localhost, connection local, on the host itself,
+# with the role's defaults — himmelblau_start_services included, which is what lets the restart
+# handler fire. A different domain (the converged-host leg) comes in through -e, which outranks
+# the play's own vars. Kept inline rather than as a tests/files/*.yml fixture: ansible-lint would
+# classify such a fixture as a playbook and syntax-check it from a directory with no roles/ link.
+- name: Write the reported playbook
+  ansible.builtin.copy:
+    dest: "{{ __nested_dir }}/play.yml"
+    mode: "0644"
+    content: |
+      ---
+      - name: The reported dry run, executed on the managed host itself
+        hosts: localhost
+        connection: local
+        gather_facts: true
+        vars:
+          himmelblau_state: present
+          himmelblau_domain: test.onmicrosoft.com
+          himmelblau_pam_allow_groups:
+            - "11111111-1111-1111-1111-111111111111"
+        roles:
+          - role: ansible-himmelblau

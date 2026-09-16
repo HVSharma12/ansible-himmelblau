@@ -11,6 +11,16 @@
   when:
     - himmelblau_state == "present"
     - himmelblau_start_services | bool
+    # Same existence gate as "Manage himmelblau services" in tasks/service.yml: a dry
+    # run on an unconverged host never installed the units, and on a transactional host with the
+    # reboot deferred the staged units are not live yet — either way systemd_service fails "Could
+    # not find the requested service", check mode or not. service.yml gathers service_facts in
+    # exactly those two cases and runs before handlers flush, so a plain present run is unchanged
+    # and still restarts unconditionally, and a dry run on an already-converged host still previews
+    # the restart (keys carry the .service suffix).
+    - >-
+      (not ansible_check_mode and not __himmelblau_is_transactional | d(false))
+      or (__handler_service ~ '.service') in (ansible_facts.services | default({}))
 
 # RESTART, not reload: installing nss-himmelblau adds a new NSS service module, and a running
 # sshd will NOT load it on a SIGHUP reload — it must be restarted, or sshd keeps rejecting Entra

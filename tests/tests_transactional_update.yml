@@ -13,9 +13,11 @@
 #   5. flag NOT injected (an inherited false host fact from the establishing play, since the
 #      detection block is skipped once the flag is defined) -> default path wholly unaffected.
 # boot_id is snapshotted first and asserted unchanged at the end: no leg may actually reboot.
-# The real reboot path, and the units-missing-until-reboot skip, cannot run under this harness
-# (the Immutable image has no cloud-init); their ground truth is the measured probes recorded in
-# the decision record and the workspace tests/agama/ playbooks.
+# The real reboot path cannot run under this harness (the Immutable image has no cloud-init); its
+# ground truth is the measured probes recorded in the decision record and the workspace
+# tests/agama/ playbooks. The units-missing-until-reboot skip IS reproduced on the gate image, by
+# tests_restart_handler.yml leg 2 (injected flag plus an already-installed stand-in package, so the
+# units are genuinely absent) — for service.yml and the restart handler alike.
 # The platform guard's own legs live in tests_platform_support.yml — this file is the
 # reboot contract only.
 
@@ -147,8 +149,9 @@
     # role believes is transactional, with the reboot deferred: the install-side include must
     # notify WITHOUT rebooting or failing, and service.yml must gate unit management on unit
     # existence instead of dying on "unit not found". On this gate image the install is live, so
-    # the units exist and are managed; the units-missing-until-reboot skip itself is proven on the
-    # real Immutable VM. The play COMPLETING is the contract here.
+    # the units exist and are managed; the units-missing-until-reboot skip itself is pinned by
+    # tests_restart_handler.yml leg 2 and proven on the real Immutable VM under tests/agama. The
+    # play COMPLETING is the contract here.
     - name: Converge with the wiring toggles off and the reboot deferred
       ansible.builtin.include_role:
         name: ansible-himmelblau

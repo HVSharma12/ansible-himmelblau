@@ -19,6 +19,9 @@
 # deferred reboot (reboot_ok=false) a staged install's unit files exist only in the new snapshot,
 # so the live systemd cannot see them yet. Not needed on a plain present run, where install.yml
 # ran first so the units exist.
+# The Restart himmelblau handler's guard reads these facts too: on a --check or transactional run
+# it restarts a unit only if this gather saw it, so narrowing this `when:` would silently disarm
+# that guard.
 - name: Gather service facts so teardown, --check, and transactional runs skip missing units
   ansible.builtin.service_facts:
   when: >-

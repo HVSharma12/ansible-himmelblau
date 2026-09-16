@@ -33,8 +33,9 @@ Roles, controlled by `himmelblau_transactional_update_reboot_ok`:
 - `true` — after staging a package change the role reboots the host, waits for it to return, and
   continues: NSS/PAM wiring then runs against the live packages. One converge deploys end to end.
 - `false` — the role notifies that a reboot is required and continues without one. Units that are
-  not live yet are skipped rather than failed, but PAM/NSS wiring in the same run would still act
-  on not-yet-live packages — so pair this with `himmelblau_configure_nss: false` and
+  not live yet are skipped rather than failed (the enable/start step and the restart on a
+  configuration change alike), but PAM/NSS wiring in the same run would still act on not-yet-live
+  packages — so pair this with `himmelblau_configure_nss: false` and
   `himmelblau_configure_pam: false`, reboot at your convenience, then re-run the role with the
   toggles on to finish the deployment.
 - unset (the default) — the role **fails** when a reboot would be required, so the decision is
@@ -217,9 +218,11 @@ changes restart the `himmelblaud` / `himmelblaud-tasks` daemons via handlers.
 
 A dry run (`ansible-playbook --check`) never writes to the host, and against an already-converged
 host it reports no changes. Against a host the role has **not** converged yet it under-reports: the
-PAM and NSS wiring steps act on packages and files a dry run has not created, so they are skipped
-rather than previewed. On a transactional system a dry run of an unconverged host also reaches the
-reboot contract and stops there unless `himmelblau_transactional_update_reboot_ok` is set — see
+PAM and NSS wiring steps and the daemon enable, start and restart act on packages, files and units
+a dry run has not created, so they are skipped rather than previewed (where `/etc/nsswitch.conf`
+already exists, the NSS change is previewed). On a transactional system a dry run of an
+unconverged host also reaches the reboot contract and stops there unless
+`himmelblau_transactional_update_reboot_ok` is set — see
 [Transactional systems (SLE 16.1 Immutable)](#transactional-systems-sle-161-immutable).
 
 On transactional systems the zero-changed guarantee holds once the reboot that applies the staged

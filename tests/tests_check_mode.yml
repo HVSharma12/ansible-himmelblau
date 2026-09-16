@@ -11,8 +11,9 @@
 # on `ansible_check_mode` in tasks/nss.yml and tasks/service.yml, so those branches stay on their
 # real-run side here. On an UNCONVERGED host that matters: the NSS seed cannot really write
 # /etc/nsswitch.conf, the replace that follows then has no file, and the run dies — under a genuine
-# --check the guard skips it instead. Since tox-lsr passes no --check, the unconverged dry run is
-# not testable here and stays a recorded residual.
+# --check the guard skips it instead. So the unconverged dry run is not testable in this file;
+# tests_restart_handler.yml runs it for real, as a nested `ansible-playbook --check` executed
+# inside the VM.
 #
 # HOW THIS AVOIDS BEING VACUOUS. Re-running the role on a converged host and comparing checksums
 # proves nothing: a real converge is byte-idempotent there too, so the comparison passes whether or
