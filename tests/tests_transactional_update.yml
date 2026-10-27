@@ -1,30 +1,9 @@
 ---
-# Transactional-update reboot contract, exercised on the normal (non-transactional) gate
-# image by injecting the LSR-style __himmelblau_is_transactional flag — the same mechanism upstream
-# LSR roles use to test this path. Five legs:
-#   1. reboot_ok UNSET (null) + a real package change   -> the role must FAIL with the exact
-#      contract message (rescued negative leg), and must NOT reboot.
-#   2. state=absent with reboot_ok=false                -> staged removal notifies and CONTINUES.
-#   3. reboot_ok=false on PRESENT (staged-rollout pair) -> notifies, skips unit management rather
-#      than dying, and CONTINUES without reboot (the deferred-reboot path).
-#   4. reboot_ok UNSET on ABSENT + a real package change -> the REMOVAL-side include must fire and
-#      produce the same contract failure (rescued negative). Leg 1 pins the install side; without
-#      this leg the removal-side block could be deleted and leg 2 would still pass.
-#   5. flag NOT injected (an inherited false host fact from the establishing play, since the
-#      detection block is skipped once the flag is defined) -> default path wholly unaffected.
-# boot_id is snapshotted first and asserted unchanged at the end: no leg may actually reboot.
-# The real reboot path cannot run under this harness (the Immutable image has no cloud-init); its
-# ground truth is the measured probes recorded in the decision record and the workspace
-# tests/agama/ playbooks. The units-missing-until-reboot skip IS reproduced on the gate image, by
-# tests_restart_handler.yml leg 2 (injected flag plus an already-installed stand-in package, so the
-# units are genuinely absent) — for service.yml and the restart handler alike.
-# The platform guard's own legs live in tests_platform_support.yml — this file is the
-# reboot contract only.
+# Transactional-update reboot contract via the injected __himmelblau_is_transactional
+# flag: unset fails (install and removal side), false continues (present and absent), no flag is
+# unaffected, and boot_id never changes. The real reboot is measured on the Immutable image.
 
-# Leg 1 needs the package install to be a real CHANGE, or the staged-reboot include never fires and
-# the contract failure it asserts cannot happen. Establish that here rather than inheriting it from
-# whatever ran before: several tests_*.yml passed to one tox-lsr invocation share a single VM, so a
-# preceding test may well have left the packages installed.
+# Leg 1 needs a real package change, and a shared VM may already have the packages.
 - name: Establish an uninstalled starting point (this file must not assume a fresh VM)
   hosts: all
   become: true
@@ -91,13 +70,8 @@
               {{ ansible_failed_result.msg | default('(no message)') }}
             quiet: true
 
-# THE FLAG MUST BE INJECTED THROUGH include_role vars, NEVER through play vars. Any run of the role
-# on this host — the establishing play above, or any earlier tests_*.yml in a shared VM — reaches
-# the set_fact at tasks/main.yml:44-46 and pins __himmelblau_is_transactional as a HOST FACT.
-# set_fact outranks play vars, so a play-var injection is silently ignored and the leg quietly
-# converges on the non-transactional path: no reboot include, no notify, and — because these two
-# legs assert only that the play completes — a green result proving nothing. include_role vars are
-# role params and do outrank set_fact, which is why leg 1 was never affected. Measured, not assumed.
+# Inject the flag through include_role vars: an earlier run set_facts it as a host fact, which
+# outranks play vars, so a play-var injection is silently ignored.
 - name: Transactional contract leg 2 — reboot_ok=false notifies and continues on teardown
   hosts: all
   become: true
@@ -150,8 +124,8 @@
     # notify WITHOUT rebooting or failing, and service.yml must gate unit management on unit
     # existence instead of dying on "unit not found". On this gate image the install is live, so
     # the units exist and are managed; the units-missing-until-reboot skip itself is pinned by
-    # tests_restart_handler.yml leg 2 and proven on the real Immutable VM under tests/agama. The
-    # play COMPLETING is the contract here.
+    # tests_restart_handler.yml leg 2 and proven on the real Immutable VM under
+    # tests/agama. The play COMPLETING is the contract here.
     - name: Converge with the wiring toggles off and the reboot deferred
       ansible.builtin.include_role:
         name: ansible-himmelblau
@@ -166,10 +140,7 @@
         himmelblau_transactional_update_reboot_ok: false
         __himmelblau_is_transactional: true
 
-# Leg 1 proves the INSTALL-side reboot include fires — its contract failure is produced by nothing
-# else. Until now nothing did the same for the REMOVAL side: delete that whole block from
-# tasks/main.yml and leg 2 would still complete and still pass. Leg 3 has just reinstalled the
-# packages, so a teardown here is a real transaction again and can spend it on this proof.
+# Leg 4: leg 1 covers only the install-side include; leg 3 reinstalled, so teardown is real.
 - name: Transactional contract leg 4 — the removal-side include fires (rescued negative)
   hosts: all
   become: true
@@ -219,10 +190,7 @@
   hosts: all
   become: true
   vars:
-    # No injected flag. The role's own stat has already run (the establishing play above pinned
-    # __himmelblau_is_transactional as a host fact, and /sbin/transactional-update does not exist
-    # on this image), so the flag is false here and reboot_ok stays at its null default WITHOUT
-    # consequence — which is the contract this leg checks.
+    # No injected flag: the real stat found no transactional-update, so null reboot_ok is harmless.
     himmelblau_domain: example.onmicrosoft.com
     himmelblau_pam_allow_no_groups: true
     himmelblau_start_services: false

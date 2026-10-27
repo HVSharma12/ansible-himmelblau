@@ -36,10 +36,8 @@ import sys
 import time
 
 SU = "/usr/bin/su"
-# Matches a PAM password prompt waiting at the very end of the stream, e.g. "Password: ",
-# "Entra Id Password: ", "<user>'s password: " — case-insensitive. The tail is [ \t]*\Z, NOT
-# \s*$: \Z is the true end of the buffer and \s/$ would also match across the newline su prints
-# once a prompt has been answered, so the same prompt would be answered a second time.
+# A password prompt at the true end of the buffer: \s*$ would also match past the newline su
+# prints after an answer, so the same prompt would be answered twice.
 PROMPT = re.compile(rb"(?i)password[^\n]*:[ \t]*\Z")
 
 

@@ -1,24 +1,19 @@
 ---
 galaxy_info:
-  # Published under the SUSE GitHub organisation: namespace, author and company mirror
-  # SUSE/ansible-suseconnect, the sibling role.
+  # Namespace, author and company mirror SUSE/ansible-suseconnect.
   namespace: suse
   role_name: himmelblau
   author: Harshvardhan Sharma <harshvardhan.sharma@suse.com>
   description: Deploy Himmelblau for Microsoft Entra ID authentication and identity on SLE 16.1
   company: SUSE
   license: MIT
-  # Floor = the tested reality: the gate runs the SLES-16-shipped ansible-core 2.18.
-  min_ansible_version: "2.18"
-  # Galaxy's platform schema only accepts "all" (or long-EOL versions) for SUSE, so the version
-  # list cannot state the real floor. The actual contract is SLE 16.1 and later only — including
-  # the Immutable (transactional) variant, which Ansible reports as SL-Micro — enforced at runtime
-  # by the role's supported-platform assert. Earlier releases and openSUSE are the
-  # v1.x series' scope and are refused on present.
+  # Floor = the tested reality: the gate runs the SLE-16.1-shipped ansible-core 2.20.2.
+  min_ansible_version: "2.20"
+  # The schema stops at "16"; the platform assert enforces 16.1+.
   platforms:
     - name: SLES
       versions:
-        - all
+        - "16"
   galaxy_tags:
     - sles
     - identity

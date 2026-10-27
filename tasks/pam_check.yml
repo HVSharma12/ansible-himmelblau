@@ -1,0 +1,45 @@
+---
+# tasks/pam_check.yml — read-only pre-flight for a run that leaves PAM alone: a stack an earlier
+# run or an operator wired must still deny users outside the allow list.
+
+- name: Read the PAM auth and account stacks
+  ansible.builtin.slurp:
+    src: "/etc/pam.d/{{ __himmelblau_pam_check_file }}"
+  loop:
+    - common-auth
+    - common-account
+  loop_control:
+    loop_var: __himmelblau_pam_check_file
+  register: __himmelblau_pam_check_stack
+
+- name: Refuse a wired PAM stack whose account line does not deny out-of-group users
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (__himmelblau_pam_check_auth ~ '\n' ~ __himmelblau_pam_check_account)
+        is search(__himmelblau_pam_check_module_re)
+        or __himmelblau_pam_check_lines | length > 0
+      - >-
+        __himmelblau_pam_check_lines | reject('search', __himmelblau_pam_check_word_re)
+        | reject('search', __himmelblau_pam_check_ctl_re) | list | length == 0
+    fail_msg: >-
+      himmelblau is wired into PAM, by an earlier run or by hand, but its account setup does not
+      deny users outside himmelblau_pam_allow_groups: /etc/pam.d/common-account has no
+      pam_himmelblau account line, or one whose control is not required, requisite or
+      [success=ok auth_err=die default=ignore] (for example the `sufficient` that 1.1.x and
+      earlier wrote). This run has himmelblau_configure_pam=false, so it changes nothing. Re-run
+      with himmelblau_configure_pam=true to repair a `sufficient` or `required` account line; fix
+      any other control, a missing line or a `-account` line by hand, or remove himmelblau from
+      PAM (pam-config --delete --himmelblau).
+      Account lines: {{ __himmelblau_pam_check_lines }}
+    quiet: true
+  vars:
+    __himmelblau_pam_check_module_re: '(?m)^\s*-?\w+\s.*pam_himmelblau\.so'
+    __himmelblau_pam_check_line_re: '(?im)^[ \t]*-?account[ \t][^#\n]*pam_himmelblau\.so'
+    __himmelblau_pam_check_word_re: '(?i)^\s*-?account\s+(?:required|requisite)\s'
+    __himmelblau_pam_check_ctl_re: '^\s*-?account\s+\[success=ok auth_err=die default=ignore\]\s'
+    __himmelblau_pam_check_auth: "{{ __himmelblau_pam_check_stack.results[0].content | b64decode }}"
+    __himmelblau_pam_check_account: >-
+      {{ __himmelblau_pam_check_stack.results[1].content | b64decode }}
+    __himmelblau_pam_check_lines: >-
+      {{ __himmelblau_pam_check_account | regex_findall(__himmelblau_pam_check_line_re) }}

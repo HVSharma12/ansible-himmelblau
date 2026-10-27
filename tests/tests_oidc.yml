@@ -1,9 +1,6 @@
 ---
-# OIDC test: generic OIDC mode, which is selected by setting himmelblau_oidc_issuer_url alone —
-# exactly as Himmelblau itself derives it.
-# Covers oidc_issuer_url rendering, the required app_id, the enable_hello
-# knob, domain being optional under OIDC only, and the OIDC render path's
-# own idempotency leg.
+# Generic OIDC, selected by himmelblau_oidc_issuer_url alone: issuer render, required
+# app_id, enable_hello, domain optional under OIDC only, and idempotency.
 - name: Configure himmelblau for a generic OIDC provider (domain + app_id set)
   hosts: all
   become: true
@@ -105,11 +102,7 @@
       vars:
         __content: "{{ __conf2.content | b64decode }}"
 
-# Negative: domain is REQUIRED for Entra — Himmelblau does NOT infer it from the first
-# user's UPN — and the issuer is the only alternative anchor. So neither set must ABORT at the
-# pre-flight anchor guard rather than emit an anchor-less [global] that can authenticate nobody.
-# This is also what retires the old `idp_provider: none` waiver. Tenant-less: the guard
-# is a pre-flight assert, so nothing is installed or changed.
+# Negative: with neither domain nor issuer the pre-flight anchor guard aborts.
 - name: Anchor guard rejects a config with neither domain nor issuer
   hosts: all
   become: true
@@ -169,10 +162,7 @@
               {{ ansible_failed_result.msg | default('(no msg)') }}
             quiet: true
 
-# The minimal Entra shape: a domain alone is a complete identity anchor. app_id is
-# almost never set for Entra — it is needed only for specific cases such as enumerating groups or
-# reading extended attributes — so the Quick start ships domain-only, and this leg holds that shape
-# honest: no `app_id =` and no `oidc_issuer_url =` may appear, while the base keys still render.
+# The Quick start's domain-only Entra shape: no app_id or issuer key may render.
 - name: Converge the minimal Entra shape (domain only, no app_id)
   hosts: all
   become: true

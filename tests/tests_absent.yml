@@ -145,8 +145,8 @@
              | select('in', ansible_facts.packages) | list }}
         quiet: true
 
-    # nss-himmelblau is a virtual capability (the rpm is libnss_himmelblau2 in the base product; ADR
-    # 0029), so a name-based "not in packages" check is ALWAYS vacuously true for it. Ask rpm
+    # nss-himmelblau is a virtual capability (the rpm is libnss_himmelblau2 in the base product),
+    # so a name-based "not in packages" check is ALWAYS vacuously true for it. Ask rpm
     # whether any installed package still provides the capability instead.
     - name: Check whether anything still provides nss-himmelblau after teardown
       ansible.builtin.command: # noqa: command-instead-of-module

@@ -1,47 +1,9 @@
 ---
-# Supported-platform contract and the two fail-loud unsupported paths,
-# exercised on the normal SLE 16.1 gate image by shadowing the facts the role dispatches on — the
-# same mechanism the reboot-contract test uses for its injected flag. Six legs:
-#   1. injected SLE 15.6      -> the platform guard refuses with its base-product message.
-#   2. injected SLE 16.0      -> refused too. This is the near-miss the guard exists for: same
-#      distribution, same major version, one minor below the floor. Without it a slip from
-#      `distribution_version is version('16.1', '>=')` to a major-version comparison would admit
-#      every 16.0 host while leg 1 stayed green.
-#   3. injected SLES_SAP 16.1 -> refused likewise; Ansible reports the SAP variant under its own
-#      distribution name, which the guard's allow-list deliberately does not admit.
-#   4. injected SL-Micro 16.1 -> ADMITTED: the guard lets the Immutable variant through and the
-#      converge reaches the render. This leg deliberately asserts ONLY what it produced itself —
-#      see the note on its own assert for why the package set and PAM method cannot be checked
-#      here.
-#   5. a family with no vars file, and __himmelblau_pam_method PINNED to "manual" -> pam.yml must
-#      FAIL LOUDLY rather than silently skip PAM. Note what the pin costs: this leg proves the
-#      refusal and proves the login-scoping guard is gated on the method, but it does NOT prove
-#      that an unsupported family ends up on "manual" — the pin decides that. A separate assert
-#      covers the dispatch half by showing no vars file matches the shadowed facts.
-#   6. the same host with configure_pam off -> ssh.yml must FAIL LOUDLY for the same reason. This
-#      one needs no pin: ssh.yml keys directly on ansible_facts['os_family'], so it is end to end.
-#
-# Legs 1, 2, 3, 5 and 6 are rescued negatives: the contract is that the role REFUSES. Leg 4 is the
-# positive counterweight — without it a typo in the guard's allow-list would refuse the Immutable
-# variant and every remaining leg would still pass.
-#
-# Legs 5 and 6 shadow a family the role has no vars file for, so its first_found dispatch matches
-# nothing (skip: true) — the shape a genuinely unsupported platform has. That alone is NOT enough to
-# leave __himmelblau_pam_method at its vars/main.yml default: include_vars values persist for the
-# WHOLE ansible-playbook run, across plays and across test files, so vars/Suse.yml loaded by any
-# earlier play is still in scope. Neither a play var nor a task var can displace it (both rank below
-# include_vars); include_role vars can, which is why leg 5 pins the method — the same mechanism the
-# reboot-contract test uses for __himmelblau_is_transactional.
-#
-# The dispatch tries distribution FIRST (`<distribution>_<version>.yml`, then `<distribution>.yml`,
-# then `<os_family>.yml`), so os_family is only the last of three chances to match. Adding a
-# vars/SLES.yml later would silently falsify these legs' premise with nothing going red — hence the
-# explicit no-match assert in leg 5.
-#
-# This file establishes everything it needs and asserts nothing about the host it lands on, so it
-# is safe in any position when several tests_*.yml share one tox-lsr VM.
+# Supported-platform contract via shadowed facts: legs 1-3 (SLE 15.6, 16.0,
+# SLES_SAP) and 5-6 (no vars file) refuse, leg 4 (SL-Micro 16.1) is admitted. Leg 5 pins the PAM
+# method, since include_vars from earlier plays persists for the whole run.
 
-- name: Platform guard leg 1 — a pre-16.1 host is refused with the v1.x pointer
+- name: Platform guard leg 1 — a pre-16.1 host is refused with the base-product reason
   hosts: all
   become: true
   tasks:
@@ -176,12 +138,7 @@
       ansible.builtin.include_role:
         name: ansible-himmelblau
       vars:
-        # A domain unique to this leg. Every other test file converges the same host with
-        # example.onmicrosoft.com, so asserting that value would be satisfied by whatever ran
-        # before — this one can only have been written by the converge above. Nothing needs
-        # restoring afterwards: legs 5 and 6 below re-render with the shared domain (configure.yml
-        # runs before the pam.yml/ssh.yml aborts), and no test file reads that value without
-        # converging it itself.
+        # A domain only this leg writes, so no earlier test can satisfy the render assert.
         himmelblau_domain: slmicro.onmicrosoft.com
         himmelblau_pam_allow_no_groups: true
         himmelblau_start_services: false
@@ -198,12 +155,7 @@
         src: /etc/himmelblau/himmelblau.conf
       register: __slmicro_conf
 
-    # NOTE on what is deliberately NOT asserted here. The obvious extra proofs that vars/Suse.yml
-    # resolved — himmelblau-sso installed, pam-config wired — cannot be trusted in this file. Every
-    # preceding test converges this same host as SUSE, and include_vars values persist for the whole
-    # ansible-playbook run, so both would already be true no matter what this leg's own dispatch
-    # did. Asserting them would look stronger and prove less. Guard admission (above) plus a render
-    # this leg alone could have produced is what is actually verifiable here.
+    # Packages and PAM method are not asserted: earlier plays' include_vars already made them true.
     - name: Assert the guard admitted SL-Micro and the converge reached the render
       ansible.builtin.assert:
         that:
@@ -217,12 +169,8 @@
   hosts: all
   become: true
   tasks:
-    # The dispatch half of this leg's premise, proven directly rather than assumed: none of the
-    # three files first_found would try exists, so a real host with these facts would fall through
-    # to vars/main.yml. The pin below then supplies that value regardless of what earlier plays
-    # leaked, which is what makes the refusal reachable — but only this assert shows the
-    # fall-through is real. tests/roles/<role> is the self-symlink, so this resolves to the
-    # role's own vars/.
+    # The pin below decides the method; this proves a real host with these facts would also fall
+    # through to vars/main.yml.
     - name: Assert no vars file matches the shadowed platform
       ansible.builtin.assert:
         that:
@@ -230,10 +178,7 @@
             query('first_found',
                   {'files': ['SLES_16.1.yml', 'SLES.yml', 'RedHat.yml'],
                    'paths': [__vars_dir], 'skip': true}) | length == 0
-          # Positive control, and the reason this assert is not self-satisfying: playbook_dir is
-          # the PLAYBOOK's directory, not the role's, so a path that stops resolving returns []
-          # — exactly what the condition above asserts. Requiring the same lookup to find
-          # Suse.yml makes a broken path fail loudly instead of confirming the premise.
+          # Positive control: a broken lookup path would also return [] above.
           - >-
             query('first_found',
                   {'files': ['Suse.yml'], 'paths': [__vars_dir], 'skip': true}) | length == 1
@@ -260,16 +205,9 @@
             # the himmelblau_packages override has.
             himmelblau_packages:
               - bash
-            # The method a platform with no vars file gets. PINNED, not inherited: an earlier
-            # play's include_vars of vars/Suse.yml survives into this one (see the header) and
-            # would otherwise leave this at "pam-config", firing the login-scoping guard first and
-            # hiding the refusal this leg exists to prove. Because it is pinned, this leg does not
-            # prove that an unsupported family GETS "manual" — the assert above covers that half.
+            # Pinned: an earlier play's vars/Suse.yml would otherwise leave "pam-config" in scope.
             __himmelblau_pam_method: manual
-            # distribution/version keep the platform guard satisfied; os_family is what steers the
-            # vars dispatch, and there is no vars/RedHat.yml, so the dispatch matches nothing.
-            # pkg_mgr must be shadowed too — ansible.builtin.package picks its backend from that
-            # fact, and a wholesale ansible_facts shadow would otherwise remove it.
+            # No vars/RedHat.yml matches; pkg_mgr is kept so the package module finds its backend.
             ansible_facts:
               distribution: SLES
               distribution_version: "16.1"
@@ -294,10 +232,7 @@
               {{ ansible_failed_result.msg | default('(no message)') }}
             quiet: true
 
-        # The login-scoping guard is gated on the method being pam-config, so on this host it must
-        # stand aside and let the clearer error above surface. Neither pam_allow_groups nor
-        # pam_allow_no_groups was set, so if that gate regressed the run would have aborted with
-        # "unscoped login" instead — which the assert above would have caught.
+        # Unscoped and not pam-config: the scoping guard must stand aside for the clearer error.
         - name: Assert the login-scoping guard stood aside rather than aborting first
           ansible.builtin.assert:
             that:
@@ -322,6 +257,8 @@
             himmelblau_configure_nss: false
             # PAM off, or leg 5's refusal fires first and this leg never reaches ssh.yml.
             himmelblau_configure_pam: false
+            # The login-scoping guard applies with PAM off too.
+            himmelblau_pam_allow_no_groups: true
             himmelblau_configure_ssh: true
             himmelblau_packages:
               - bash

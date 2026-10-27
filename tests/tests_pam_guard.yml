@@ -36,6 +36,53 @@
               abort. Got: {{ ansible_failed_result.msg | default('(no msg)') }}
             quiet: true
 
+# Blank entries and a bare string scope no one, so they must not satisfy the guard.
+- name: PAM login-scoping guard refuses blank and string allow lists
+  hosts: all
+  become: true
+  tasks:
+    - name: Run the role with only blank allow-list entries (expect a guard abort)
+      block:
+        - name: Include the role with blank entries
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_groups: ["", " "]
+            himmelblau_start_services: false
+
+        - name: Fail the test if blank entries passed the guard
+          ansible.builtin.fail:
+            msg: Blank allow-list entries satisfied the login-scoping guard.
+      rescue:
+        - name: Confirm blank entries were refused by the login-scoping guard
+          ansible.builtin.assert:
+            that:
+              - "'unscoped login' in (ansible_failed_result.msg | default(''))"
+            fail_msg: "Got: {{ ansible_failed_result.msg | default('(no msg)') }}"
+            quiet: true
+
+    - name: Run the role with a string allow list (expect a guard abort)
+      block:
+        - name: Include the role with a string instead of a list
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_pam_allow_groups: f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12
+            himmelblau_start_services: false
+
+        - name: Fail the test if a string passed the guard
+          ansible.builtin.fail:
+            msg: A string allow list satisfied the login-scoping guard.
+      rescue:
+        - name: Confirm a string was refused by the login-scoping guard
+          ansible.builtin.assert:
+            that:
+              - "'unscoped login' in (ansible_failed_result.msg | default(''))"
+            fail_msg: "Got: {{ ansible_failed_result.msg | default('(no msg)') }}"
+            quiet: true
+
 # Positive control: an explicit allow-all opt-in satisfies the guard. This is a deliberate FULL
 # converge (install from the base product) — not tenant-less like the negative leg — so it also
 # proves the guard lets a valid opt-in proceed end to end. Needs the target registered with SCC.

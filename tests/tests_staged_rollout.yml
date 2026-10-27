@@ -1,30 +1,6 @@
 ---
-# Staged rollout: configure_nss / configure_pam OFF on a PRESENT run. This is the
-# pairing the README documents for a deferred reboot on a transactional host — install and render
-# now, wire NSS/PAM after the reboot — and it is the operator's lock-out escape hatch, so "the
-# toggles are honoured" has to be an assertion rather than an assumption. The reboot-contract test
-# runs this shape already but asserts only that the play completes.
-#
-# The property under test: with configure_nss/configure_pam false the role installs and renders but
-# wires NOTHING — /etc/nsswitch.conf is untouched and pam-config knows nothing about himmelblau.
-#
-# NOT under test, deliberately. An earlier draft of this file also pinned the login-scoping guard
-# standing aside when configure_pam is false, reasoning that "when no PAM is being wired
-# there is no login to scope". That reasoning is wrong: scoping lives in the RENDERED CONFIG, and
-# configure.yml renders unconditionally. On a host wired by an earlier run, a converge with
-# configure_pam false and an empty himmelblau_pam_allow_groups rewrites the config to allow-all and
-# restarts the daemon with no guard firing. So this file supplies
-# himmelblau_pam_allow_no_groups explicitly and does not record the stand-aside as intended
-# behaviour — a test that pins a gap as a contract makes the gap harder to close.
-#
-# The completing play ("Complete the rollout") then converges with the toggles on, so the absence
-# asserts in the preceding verify play cannot pass vacuously: something that never wires NSS/PAM at
-# all would fail there, not sail through here. (Plays are referenced by name, not position — an
-# establishing play was inserted once already and the numbering drifted.)
-#
-# Tenant-less (start_services: false). This file establishes its own starting state and asserts
-# nothing about the host it lands on, so it is safe in any position when several tests_*.yml share
-# one tox-lsr VM.
+# Staged rollout: with configure_nss/configure_pam false the role installs and renders
+# but wires nothing, an unscoped staged run is refused, and the completing play wires.
 
 - name: Establish an unwired starting point (this file must not assume a fresh VM)
   hosts: all
@@ -35,6 +11,36 @@
   roles:
     - role: ansible-himmelblau
 
+- name: An unscoped staged run is refused
+  hosts: all
+  become: true
+  tasks:
+    - name: Converge with the wiring toggles off and no scoping
+      block:
+        - name: Apply the role (expect the login-scoping guard)
+          ansible.builtin.include_role:
+            name: ansible-himmelblau
+          vars:
+            himmelblau_domain: example.onmicrosoft.com
+            himmelblau_configure_nss: false
+            himmelblau_configure_pam: false
+            himmelblau_start_services: false
+
+        - name: Fail if the guard stood aside
+          ansible.builtin.fail:
+            msg: >-
+              The role converged an unscoped config because configure_pam was false. On a host
+              wired by an earlier run that config admits every tenant user.
+      rescue:
+        - name: Assert the refusal was the login-scoping guard
+          ansible.builtin.assert:
+            that:
+              - "'unscoped login' in (ansible_failed_result.msg | default(''))"
+            fail_msg: >-
+              The converge failed, but not on the login-scoping guard:
+              {{ ansible_failed_result.msg | default('(no message)') }}
+            quiet: true
+
 - name: Stage the rollout — install and render, wire nothing
   hosts: all
   become: true
@@ -42,8 +48,7 @@
     himmelblau_domain: example.onmicrosoft.com
     himmelblau_configure_nss: false
     himmelblau_configure_pam: false
-    # Supplied explicitly rather than relying on the guard being skipped — see the
-    # header. The staged rollout defers the WIRING; it should not defer the scoping decision.
+    # The staged rollout defers the WIRING, not the scoping decision.
     himmelblau_pam_allow_no_groups: true
     himmelblau_start_services: false
   roles:
@@ -155,10 +160,7 @@
       ansible.builtin.assert:
         that:
           - __staged_after.stat.checksum == __staged_before.stat.checksum
-          # The config being byte-identical is not enough. A regression that wires NSS or PAM only
-          # on a RE-converge over an already-installed host — the exact shape an operator meets
-          # when re-running a staged rollout — would leave the config unchanged and still slip
-          # through, because the absence asserts above ran before this converge.
+          # A staged re-converge must not wire NSS or PAM either.
           - >-
             not __staged2_nsswitch_stat.stat.exists
             or 'himmelblau' not in (__staged2_nsswitch.content | b64decode)

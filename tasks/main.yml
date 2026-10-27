@@ -31,8 +31,8 @@
       skip: true
 
 # Transactional hosts (SLE 16.1 Immutable / SL Micro) stage package changes into a new snapshot
-# that only becomes live after a reboot. Detection follows the LSR pattern and is guarded so
-# tests can inject the flag.
+# that only becomes live after a reboot. Detection follows the LSR pattern and is
+# guarded so tests can inject the flag.
 - name: Determine if system is transactional update and set flag
   when: not __himmelblau_is_transactional is defined
   block:
@@ -54,12 +54,8 @@
       otherwise drive a silent partial teardown (install/configure skip, services stop).
     quiet: true
 
-# Supported-platform guard. The role installs from the SLE 16.1 base product, so an older release
-# has no source for the packages at all. os_family alone is NOT enough: SLE 15.x, SLE 16.0, Leap
-# and Tumbleweed are all "Suse", pass every other assert, and would otherwise reach install.yml
-# and die on the package manager's own error. "SL-Micro" is how Ansible reports the SLE 16.1
-# Immutable (transactional) variant — supported under the transactional reboot contract, so it is
-# admitted here. Present-only, so teardown of a host wired by an older release still works.
+# os_family is not enough: SLE 15.x, 16.0, Leap and Tumbleweed are "Suse" too.
+# SL-Micro is the 16.1 Immutable variant. Present-only, so teardown still works.
 - name: Assert the target is a supported platform (SLE 16.1 or later)
   ansible.builtin.assert:
     that:
@@ -69,19 +65,15 @@
       This role supports SLES 16.1+ and SL-Micro 16.1+ (the Immutable variant) only — it installs
       Himmelblau from the SLE 16.1 base product and adds no repository. This host is
       {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
-      For SLE 15.x / SLE 16.0 / openSUSE, use the v1.x series, which manages the network:idm
-      repository. Ansible reports the SAP and Desktop variants as SLES_SAP / SLED, which this
-      role does not claim support for and has never been tested on; if you are on such a 16.1
-      host and want to proceed anyway, the packages resolve the same way — set
-      himmelblau_packages yourself and wire PAM with configure_pam=false, or raise an issue.
-      Registration with the SUSE Customer Center (or an RMT/SMT mirror) is also required —
-      without it the packages will not resolve.
+      SLE 15.x, SLE 16.0 and openSUSE carry Himmelblau only in the third-party network:idm
+      repository, which this role does not manage. The SAP and Desktop variants (SLES_SAP /
+      SLED) are not supported; raise an issue if you need them. Registration with the SUSE
+      Customer Center (or an RMT/SMT mirror) is also required — without it the packages will not
+      resolve.
     quiet: true
   when: himmelblau_state == "present"
 
-# The IdP mode is not a variable: Himmelblau derives it from oidc_issuer_url alone — set, and it
-# authenticates against that OIDC provider; unset, and it uses its native Entra flow. So the role
-# validates the same way, rather than through a provider switch of its own.
+# Himmelblau derives the IdP mode from oidc_issuer_url alone; validate the same way.
 - name: Assert the OIDC client id is set when an OIDC issuer is configured
   ansible.builtin.assert:
     that:
@@ -92,9 +84,7 @@
     quiet: true
   when: himmelblau_state == "present"
 
-# domain is REQUIRED for Entra and optional only when authenticating via OIDC, because OIDC users
-# need not sign in with a UPN. It is NOT inferred from the first user's UPN — upstream's
-# own domain.xml says both, and the maintainer confirmed the inference half is wrong.
+# domain is required for Entra, optional only under OIDC.
 - name: Assert an identity anchor is configured
   ansible.builtin.assert:
     that:
@@ -107,35 +97,46 @@
     quiet: true
   when: himmelblau_state == "present"
 
-# Pre-flight login-scoping guard: only pam_allow_groups scopes who can log in (unset =
-# allow-all). Admin groups (local_groups/sudo_groups) are post-login membership/sudo and do NOT
-# scope login. Refuse to wire PAM with unscoped login unless allow-all is explicitly accepted —
-# run here, before install/NSS, so a misconfig aborts with no partial state.
-- name: Refuse to wire PAM with unscoped login
+# Before install/NSS, so a misconfig leaves no partial state. Not gated on
+# configure_pam: the config renders every run and PAM may already be wired.
+- name: Refuse an unscoped login config
   ansible.builtin.assert:
     that:
-      - himmelblau_pam_allow_groups | length > 0 or himmelblau_pam_allow_no_groups | bool
+      - >-
+        himmelblau_pam_allow_no_groups | bool
+        or (himmelblau_pam_allow_groups is not string
+            and himmelblau_pam_allow_groups | length > 0
+            and himmelblau_pam_allow_groups | map('string') | map('trim') | select | list | length
+            == himmelblau_pam_allow_groups | length)
     fail_msg: >-
-      Refusing to configure PAM with unscoped login: with himmelblau_pam_allow_groups empty, EVERY
-      Entra tenant user can authenticate to this host. Admin groups (himmelblau_local_groups /
-      himmelblau_sudo_groups) only grant membership/sudo AFTER login — they do NOT restrict who can
-      log in. Set himmelblau_pam_allow_groups to scope login, or himmelblau_pam_allow_no_groups=true
-      to consciously accept allow-all. This guard reads only the typed himmelblau_pam_allow_groups —
-      scoping via himmelblau_extra_config.pam_allow_groups does NOT satisfy it (use the typed var).
+      Refusing to render an unscoped login config: with himmelblau_pam_allow_groups empty (or
+      holding a blank entry, or a string instead of a list), EVERY
+      Entra tenant user can authenticate to this host once PAM is wired — by this run or an earlier
+      one, so himmelblau_configure_pam=false does not make this safe. Admin groups
+      (himmelblau_local_groups / himmelblau_sudo_groups) only grant membership/sudo AFTER login —
+      they do NOT restrict who can log in. Set himmelblau_pam_allow_groups to scope login, or
+      himmelblau_pam_allow_no_groups=true to consciously accept allow-all. This guard reads only
+      the typed himmelblau_pam_allow_groups — scoping via himmelblau_extra_config.pam_allow_groups
+      does NOT satisfy it (use the typed var).
       Keep a root rescue shell open.
     quiet: true
   when:
     - himmelblau_state == "present"
-    - himmelblau_configure_pam | bool
-    # Only where PAM is actually wired (pam-config is the sole implemented method). On other
-    # platforms (__himmelblau_pam_method == "manual") PAM wiring is unsupported and pam.yml
-    # emits a clearer "set configure_pam=false and wire PAM yourself" error — let that surface
-    # instead of the login-scoping abort. Trading away the original method-agnostic guard was
-    # accepted deliberately.
+    # Elsewhere pam.yml's clearer unsupported-method error surfaces instead.
     - __himmelblau_pam_method == "pam-config"
 
-# The packages ship in the SLE 16.1 base product, so a registered host already resolves them —
-# there is no repository for the role to manage.
+# With PAM wiring off, a stack already wired still decides who logs in.
+- name: Check a PAM stack this run leaves alone
+  ansible.builtin.include_tasks: pam_check.yml
+  when:
+    - himmelblau_state == "present"
+    - not himmelblau_configure_pam | bool
+    - __himmelblau_pam_method == "pam-config"
+
+# No repository step: on SLE 16.1 the himmelblau packages ship in the base product, so a registered
+# host already resolves them and there is nothing for the role to add.
+# Registration is the operator's prerequisite; an unregistered host fails here with zypper's
+# "No provider of 'himmelblau' found".
 - name: Install packages
   ansible.builtin.include_tasks: install.yml
   when: himmelblau_state == "present"

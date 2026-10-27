@@ -10,11 +10,8 @@
 #   5. leave the daemons ENABLED but NOT started — start_services=false — with nscd
 #      MASKED where the unit exists (not merely "not running"),
 #   6. render no [offline_breakglass] section when the feature is off,
-#   7. create the tss group himmelblaud.service needs, and render the config with the LSR
-#      "Ansible managed" header and a pinned owner/mode,
-# and the himmelblau_state enum guard must reject a typo (negative leg). A final play converges
-# under gather_facts: false — the only reason tasks/main.yml gathers the distribution subset
-# itself — and untested until now.
+#   7. create the tss group and render the managed header and owner/mode,
+# plus a state-enum negative leg and a gather_facts: false converge.
 - name: Test himmelblau default deployment
   hosts: all
   become: true
@@ -144,10 +141,7 @@
           NSS not wired to himmelblau exactly once in every DB. passwd: {{ __passwd_line }}
           group: {{ __group_line }} shadow: {{ __shadow_line }}
         quiet: true
-      # Named for this file. A bare __nss here was silently shadowed by a same-named register in
-      # tests_absent.yml whenever both files ran in one tox-lsr invocation: registered vars outrank
-      # task vars and persist across playbooks, so these three came out empty and the assert failed
-      # on a correctly-wired host.
+      # Prefixed: registers in other test files outrank task vars across one run.
       vars:
         __nss_content: "{{ __after.results[1].content | b64decode }}"
         __passwd_line: "{{ __nss_content | regex_search('(?m)^passwd:.*$') | default('', true) }}"
@@ -185,12 +179,7 @@
           auth/account stack membership must be proven, not assumed.
         quiet: true
 
-    # The himmelblau ACCOUNT line must carry the upstream-declared control: pam-config
-    # < 2.14 hardcodes `required`; v1.x rewrote it to `sufficient`, which — once himmelblau >= 3.1.8
-    # serves synthetic shadow entries — let out-of-group Entra users through pam_unix. The role now
-    # sets `[success=ok auth_err=die default=ignore]` (what himmelblau >= 3.1.12 itself writes on
-    # upgrade). Assert the exact control and that neither legacy form survives; the regexes are
-    # pinned once in vars/pam_account_control.yml (vars_files above).
+    # Neither legacy control (`required`, `sufficient`) may survive the rewrite.
     - name: Assert the himmelblau account control is the upstream-declared control
       ansible.builtin.assert:
         that:
@@ -260,11 +249,7 @@
           - "'[offline_breakglass]' not in (__after.results[0].content | b64decode)"
         quiet: true
 
-    # himmelblaud.service declares SupplementaryGroups=tss, and systemd refuses to start a unit
-    # whose SupplementaryGroups names a missing group (status=216/GROUP). The group is absent on a
-    # minimal image, so tasks/service.yml creates it — a bug found on a live VM. Nothing
-    # asserted it until now, so dropping that task would leave CI green while every real deploy
-    # failed to start the daemon.
+    # systemd refuses to start himmelblaud without its SupplementaryGroups=tss group.
     - name: Probe the tss group himmelblaud.service requires
       ansible.builtin.getent:
         database: group
@@ -339,22 +324,15 @@
               {{ ansible_failed_result.msg | default('(no msg)') }}
             quiet: true
 
-# tasks/main.yml opens by gathering the distribution subset when the facts it dispatches on are
-# missing — the standard LSR pattern, added because a parent play with
-# gather_facts: false died on an opaque undefined-variable error before any of the role's own
-# clear guards could speak. Gathering there is the entire reason the role tolerates un-gathered
-# facts, and no test had ever run without them. The play COMPLETING is the contract.
+# The role gathers the distribution subset itself when facts are missing; the play
+# completing is the contract.
 - name: The role converges under a parent play with gather_facts disabled
   hosts: all
   gather_facts: false
   become: true
   pre_tasks:
-    # gather_facts: false alone is NOT enough to reach the task this play exists for. Facts
-    # gathered by an earlier play stay in the host cache for the whole run, so
-    # ansible_facts['distribution'] would still be defined, the role's own subset gather would be
-    # skipped, and deleting it from tasks/main.yml would leave this play green (measured).
-    # clear_facts empties the gathered facts — note it does NOT clear include_vars or set_fact, so
-    # the vars dispatch is not exercised from scratch here, only the fact gathering.
+    # Facts from earlier plays stay cached for the run, so without this the role's gather would be
+    # skipped and this play would pass without it (measured).
     - name: Clear the facts earlier plays gathered, so the role must gather its own
       ansible.builtin.meta: clear_facts
   vars:

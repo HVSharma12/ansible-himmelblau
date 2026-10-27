@@ -1,24 +1,7 @@
 ---
-# Lock-out safety test: wiring himmelblau into PAM must NEVER prevent a local
-# user (or root) from authenticating — *especially* with himmelblaud stopped, which is the
-# real-world failure mode (tenant unreachable). tests_pam_guard.yml covers the pre-flight
-# refusal; this covers the post-wiring property. Tenant-less: the daemon stays
-# down on purpose (start_services: false) so this leg reproduces the worst case.
-#
-# The role's only supported PAM method is pam-config (tasks/pam.yml hard-fails otherwise). So the
-# safety property reduces to a checkable invariant on the assembled stack: the local fallback
-# (pam_unix) survives and no pam_himmelblau line uses a blocking control (`required`/`requisite`)
-# WITHOUT `ignore_unknown_user`. NOTE: pam-config < 2.14 hardcodes the account line as
-# `required`; the role rewrites it to the upstream-declared `[success=ok auth_err=die
-# default=ignore]`, whose `default=ignore` is a pass-through for local users and a down daemon by
-# construction. Either form is non-blocking for local/down-daemon (not `required`/`requisite`
-# without `ignore_unknown_user`), so the lock-out invariant holds. The real local password
-# conversation through the wired stack is measured on every CI run by
-# tests_pam_account_control.yml (pty-driven `su`, daemons down); the same property was proven
-# on live tenant-converged VMs and on the SLE 16.1 gate image.
-#
-# ⚠️ Full converge: installs pam-himmelblau from the base product so pam-config can
-# wire it. Disposable CI VM only — never run against a host you can't recover.
+# Lock-out safety: with himmelblaud down, the wired stack keeps pam_unix and no
+# pam_himmelblau line blocks local users; an unsafe stack is unwired and the run fails.
+# Real logins: tests_pam_account_control.yml. ⚠️ Full converge — disposable CI VM only.
 
 - name: Wire himmelblau into PAM with the daemon deliberately down
   hosts: all
@@ -50,16 +33,8 @@
     # must NOT — so the detector can never silently pass everything, nor reject the safe wiring.
     __probe_bad: "auth required pam_himmelblau.so"
     __probe_ok: "account required pam_himmelblau.so ignore_unknown_user"
-    # The role writes a BRACKETED account control,
-    # `[success=ok auth_err=die default=ignore]`, which the word-control regex above cannot see —
-    # without this, the account-stack half of the invariant would degrade to "pam_unix is present"
-    # and a regression to `default=die` would pass silently.
-    #
-    # For a bracketed control `ignore_unknown_user` does NOT rescue a local user: it makes the
-    # module return PAM_IGNORE, and what happens next is decided by the control's own `ignore=` /
-    # `default=` action, not by the option. So the invariant here is different from the one above —
-    # the PAM_IGNORE outcome must itself be `ignore`. Upstream's declared control satisfies it via
-    # `default=ignore` with no explicit `ignore=` override.
+    # A bracketed control routes PAM_IGNORE by its own ignore=/default= action, so
+    # ignore_unknown_user only rescues a local user when that action is itself `ignore`.
     __bracket_re: "(?m)^.*\\[[^]]*\\]\\s+pam_himmelblau.*$"
     __bracket_safe_re: "(?:ignore=ignore|default=ignore)"
     __bracket_unsafe_re: "ignore=(?!ignore)"
@@ -158,3 +133,97 @@
           - "'pam_himmelblau.so' in (__pam_stacks.results[0].content | b64decode)"
         fail_msg: pam_himmelblau is absent from common-auth — the role wired no PAM to test.
         quiet: true
+
+# Fail closed: an unsafe stack is unwired, never left in place. Seed a blocking
+# pam_himmelblau auth line with no ignore_unknown_user — one the account-control rewrite does not
+# touch — on the host the first play wired, then converge again.
+- name: An unsafe PAM stack is unwired and the run fails
+  hosts: all
+  become: true
+  tasks:
+    - name: Seed, converge and check the unwire
+      block:
+        - name: Seed a blocking himmelblau auth line without ignore_unknown_user
+          ansible.builtin.lineinfile:
+            path: /etc/pam.d/common-auth
+            line: auth requisite pam_himmelblau.so
+            insertafter: EOF
+
+        - name: Read common-auth to confirm the seed landed
+          ansible.builtin.slurp:
+            src: /etc/pam.d/common-auth
+          register: __seeded_auth
+
+        - name: Assert the unsafe line is in the stack the role will verify
+          ansible.builtin.assert:
+            that:
+              - "'auth requisite pam_himmelblau.so' in (__seeded_auth.content | b64decode)"
+            fail_msg: The seed did not reach common-auth, so this leg would prove nothing.
+            quiet: true
+
+        - name: Converge over the unsafe stack
+          block:
+            - name: Apply the role (expect the verify to fail and PAM to be unwired)
+              ansible.builtin.include_role:
+                name: ansible-himmelblau
+              vars:
+                himmelblau_domain: example.onmicrosoft.com
+                himmelblau_pam_allow_no_groups: true
+                himmelblau_start_services: false
+
+            - name: Fail if the role accepted the unsafe stack
+              ansible.builtin.fail:
+                msg: The role accepted a blocking pam_himmelblau line lacking ignore_unknown_user.
+          rescue:
+            - name: Assert the verify step failed and the message reports the unwire
+              ansible.builtin.assert:
+                that:
+                  - "'PAM wiring failed at' in (ansible_failed_result.msg | default(''))"
+                  - "'Verify the wired PAM stack' in (ansible_failed_result.msg | default(''))"
+                  - "'himmelblau was removed from PAM' in (ansible_failed_result.msg | default(''))"
+                fail_msg: >-
+                  The converge failed, but not at the verify or not with the unwire message:
+                  {{ ansible_failed_result.msg | default('(no message)') }}
+                quiet: true
+
+        - name: Query pam-config for himmelblau after the unwire
+          ansible.builtin.command: pam-config --query --himmelblau
+          register: __unwired_query
+          changed_when: false
+          failed_when: false
+
+        - name: Read the stacks after the unwire
+          ansible.builtin.slurp:
+            src: "/etc/pam.d/{{ __pam_file }}"
+          loop:
+            - common-auth
+            - common-account
+          loop_control:
+            loop_var: __pam_file
+          register: __unwired_stacks
+
+        - name: Assert himmelblau is gone and the local fallback stayed
+          ansible.builtin.assert:
+            that:
+              - __unwired_query.stdout | trim | length == 0
+              - "'pam_himmelblau' not in (__item.content | b64decode)"
+              - "'pam_unix.so' in (__item.content | b64decode)"
+            fail_msg: >-
+              After the unwire {{ __item.__pam_file }} still references pam_himmelblau, or lost
+              pam_unix: {{ __item.content | b64decode }}
+            quiet: true
+          loop: "{{ __unwired_stacks.results }}"
+          loop_control:
+            loop_var: __item
+            label: "{{ __item.__pam_file }}"
+      always:
+        - name: Remove the seeded line if it survived
+          ansible.builtin.lineinfile:
+            path: /etc/pam.d/common-auth
+            line: auth requisite pam_himmelblau.so
+            state: absent
+
+        - name: Unwire himmelblau if the role left it wired
+          ansible.builtin.command: pam-config --delete --himmelblau
+          changed_when: true
+          failed_when: false

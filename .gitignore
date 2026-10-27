@@ -6,20 +6,15 @@ __pycache__/
 *.qcow2
 .ansible/
 
-# Private, machine-local owner docs (requirements, goals, notes) — never committed,
-# but Claude still auto-loads them locally. Convention: anything *.local.md or under .local/.
+# Private, machine-local notes: anything *.local.md or under .local/ is never committed.
 *.local.md
 .local/
 
-# Live-tenant vault: the live playbooks and their .vault.yml.example templates live on the
-# maintainers' bench, but keep this belt-and-braces pair — a filled-in vault must
-# never be committed anywhere. The .example suffix stays safe (not matched by *.vault.yml).
+# Never commit a filled-in vault; *.vault.yml.example templates stay safe.
 *.vault.yml
 !*.vault.yml.example
 
-# Generated CI output (transient, per-commit). CI results live on the maintainers'
-# bench; keep CI-RESULTS.md/.ci-logs/ as belt-and-braces so a stale,
-# previously-generated artifact can never be swept into the shipped tree.
+# Generated CI output; never part of the shipped tree.
 CI-RESULTS.md
 .ci-logs/
 artifacts/

@@ -35,8 +35,8 @@
 #      handler is notified; both units must report changed after the handler marker, and nothing
 #      may actually restart (the daemons are enabled but stopped, and stay so).
 #
-# Self-establishing, so it is safe in any position when several tests_*.yml share one tox-lsr VM.
-# It needs the ordinary (non-transactional) SLES 16.1 gate VM: the nested ansible
+# Self-establishing, so it is safe in any position when several tests_*.yml share one tox-lsr VM
+# . It needs the ordinary (non-transactional) SLES 16.1 gate VM: the nested ansible
 # install must be live, and on the Immutable variant a genuine dry run would stop at the reboot
 # contract before the handler — leg 1 asserts that premise. Leg 2 injects the transactional flag
 # on this same host, which is the point. It leaves ansible-core and ansible installed in the VM;
@@ -401,6 +401,32 @@
           On an already-converged host a dry run must still report the restart a real run would
           perform (rc={{ __restart_dry_converged.rc }}), and must perform nothing: no unit start or
           restart counted by systemd, and no byte of the config rewritten.
+        quiet: true
+
+    # Measures the README check-mode claim, under the VM's own ansible.
+    - name: Dry-run the nested playbook with leg 3's inputs on the converged host
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook -i localhost, --connection local --check --diff
+          -e himmelblau_start_services=false play.yml
+        chdir: "{{ __nested_dir }}"
+      environment:
+        ANSIBLE_ROLES_PATH: "{{ __nested_dir }}/roles"
+        ANSIBLE_STDOUT_CALLBACK: default
+        ANSIBLE_FORCE_COLOR: "0"
+        ANSIBLE_NOCOLOR: "1"
+      register: __restart_dry_unchanged
+      changed_when: false
+      failed_when: false
+
+    - name: Assert the unchanged dry run reports no changes
+      ansible.builtin.assert:
+        that:
+          - __restart_dry_unchanged.rc == 0
+          - __restart_dry_unchanged.stdout is search('localhost\s+:\s+ok=\d+\s+changed=0\s')
+        fail_msg: >-
+          A dry run with unchanged inputs on a converged host reported changes or failed
+          (rc={{ __restart_dry_unchanged.rc }}): {{ __restart_dry_unchanged.stdout_lines[-15:] }}
         quiet: true
 
     - name: Remove the nested run's tree

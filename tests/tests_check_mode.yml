@@ -1,36 +1,7 @@
 ---
-# Check-mode safety on a converged host. The shipped
-# README ("Idempotency and check mode") tells operators a dry run never writes to the host and
-# reports no changes against an already-converged host. That is what this file measures; nothing
-# measured it before.
-#
-# WHAT THIS FILE CAN AND CANNOT PROVE — read before extending it.
-# A playbook cannot fake a real --check run. `check_mode: true` forces every module into check mode,
-# but it does NOT set `ansible_check_mode`: that variable reflects the --check command line only,
-# and no play var, task var, block or include_role var can change it (measured). The role branches
-# on `ansible_check_mode` in tasks/nss.yml and tasks/service.yml, so those branches stay on their
-# real-run side here. On an UNCONVERGED host that matters: the NSS seed cannot really write
-# /etc/nsswitch.conf, the replace that follows then has no file, and the run dies — under a genuine
-# --check the guard skips it instead. So the unconverged dry run is not testable in this file;
-# tests_restart_handler.yml runs it for real, as a nested `ansible-playbook --check` executed
-# inside the VM.
-#
-# HOW THIS AVOIDS BEING VACUOUS. Re-running the role on a converged host and comparing checksums
-# proves nothing: a real converge is byte-idempotent there too, so the comparison passes whether or
-# not any module honoured check mode. Instead this file DAMAGES each managed file first, in a way a
-# real converge is known to repair, asserts by content that the damage landed, and then asserts the
-# dry run left the damage in place. The repair runs in `always:` and asserts it worked — so damage
-# that turned out not to be repairable fails the leg rather than passing quietly.
-#
-# WHY ONE PLAY. Damage and repair must not be separate plays: a failed host is dropped from the
-# run, so any failure between them would leave the host damaged — and with several tests_*.yml in
-# one tox-lsr invocation, every later file would inherit it. `always:` is what makes the repair
-# unconditional, and `check_mode: true` on a block does propagate into an include_role inside it
-# (measured; the keyword is not valid on include_role itself).
-#
-# Tenant-less (start_services: false). This file converges the state it needs itself and asserts
-# nothing about the host it lands on, so it is safe in any position when several tests_*.yml share
-# one tox-lsr VM.
+# Check-mode safety on a converged host: damage each managed file in a way a real
+# converge repairs, dry-run, assert the damage stayed, then repair in always:. The check_mode
+# keyword does not set ansible_check_mode, so a genuine --check runs in tests_restart_handler.yml.
 
 - name: Converge for real, so there is a converged host to damage and dry-run against
   hosts: all
@@ -70,10 +41,7 @@
             replace: '\1\2'
           check_mode: false
 
-        # tasks/pam.yml rewrites `required` to the upstream-declared control, so seeding `required`
-        # is damage the role is designed to repair. `required` is deliberate: it is what pam-config
-        # itself writes, so it denies out-of-group users — unlike `sufficient`, which would be the
-        # login-scoping bypass and must never be left on a host by a failed run.
+        # `required` is repairable damage that still denies out-of-group users; never `sufficient`.
         - name: Seed the pam-config `required` account control
           community.general.pamd:
             name: common-account
@@ -94,10 +62,7 @@
             loop_var: __src
           register: __damaged_content
 
-        # Each damage task is a no-op when its pattern does not match, and none fails on a miss.
-        # Without this, a damage that silently did nothing would leave the file converged, the
-        # comparison below would compare it against itself, and the repair assert would be
-        # satisfied by a file that was never damaged — the exact vacuity this file exists to avoid.
+        # A damage task that misses its pattern is a silent no-op, which would make this vacuous.
         - name: Assert each damage actually landed, by content
           ansible.builtin.assert:
             that:
@@ -228,10 +193,7 @@
   become: true
   check_mode: true
   tasks:
-    # A dry run that reports "all fine" on a config the real run would reject is worse than no dry
-    # run at all — the operator learns the misconfiguration only in production. The pre-flight
-    # guards are plain asserts, so they fire in check mode exactly as they do on a real run; this
-    # leg keeps that true.
+    # The pre-flight guards must reject a bad config in a dry run exactly as in a real one.
     - name: Dry-run the role with a bogus himmelblau_state
       block:
         - name: Include the role — should fail at the state enum guard

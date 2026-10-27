@@ -15,13 +15,6 @@
       failed_when: false
       check_mode: false
 
-    - name: Enable himmelblau in the PAM stack
-      ansible.builtin.command: pam-config --add --himmelblau
-      when:
-        - himmelblau_state == "present"
-        - __himmelblau_pam_query.stdout | trim | length == 0
-      changed_when: true
-
     - name: Remove himmelblau from the PAM stack
       ansible.builtin.command: pam-config --delete --himmelblau
       when:
@@ -29,45 +22,137 @@
         - __himmelblau_pam_query.stdout | trim | length > 0
       changed_when: true
 
-    # ACCOUNT CONTROL. pam-config < 2.14
-    # hardcodes `account required pam_himmelblau.so ignore_unknown_user`; upstream declares
-    # `[success=ok auth_err=die default=ignore]` for that line and himmelblau >= 3.1.12 rewrites
-    # `required`/`sufficient` to it on package upgrade, so the role writes the same control.
-    # Semantics, per the module's own return codes:
-    #   - out-of-group Entra user  -> PAM_AUTH_ERR -> die: denied, terminally (scoping holds);
-    #   - in-group Entra user      -> PAM_SUCCESS  -> ok: continues to pam_unix, which succeeds on
-    #     the NSS synthetic shadow entry himmelblau >= 3.1.8 serves (SLE 16.1 ships 3.1.11);
-    #   - local user / daemon down -> PAM_IGNORE   -> ignore: pam_unix decides, as before — the
-    #     lock-out invariant is unchanged.
-    # Matches `required` (pam-config's output) AND `sufficient` (a host converged by v1.x, where
-    # synthetic shadow entries turned `sufficient` into a login-scoping bypass), so re-converging
-    # repairs both. The `[success=end …]` item is the plugin file's own 3.1.11 wording (upstream
-    # changed `end` to `ok` in 3.1.12): a pam-config >= 2.14 that honoured the plugin file while
-    # himmelblau was still < 3.1.12 would emit `end`, which is not a control action pamd or
-    # Linux-PAM accepts — pamd validates the WHOLE file on every call, so an unmatched `end` line
-    # would hard-fail this task instead of being repaired. It is listed FIRST because pamd
-    # validates after the rewrite, so it must be corrected before a later item re-reads the file.
-    # Idempotent: once the line carries the target control none of the three patterns match. On
-    # SLE16 common-account is a symlink to common-account-pc, so this lands in the pam-config-owned
-    # file and is re-applied every converge (an external pam-config run regenerates `required` —
-    # still safe — until the next converge). On absent, pam-config --delete removes the line, so
-    # there is nothing to revert. Note: a check-mode run on a not-yet-wired host reports this task
-    # ok (the pam-config --add above is skipped, so there is no himmelblau line to match) — that ok
-    # does not mean the host is already converged.
-    - name: Set the himmelblau account line to the upstream-declared control
-      community.general.pamd:
-        name: common-account
-        type: account
-        control: "{{ __himmelblau_legacy_control }}"
-        module_path: pam_himmelblau.so
-        new_control: "[success=ok auth_err=die default=ignore]"
-      loop:
-        - "[success=end auth_err=die default=ignore]"
-        - required
-        - sufficient
-      loop_control:
-        loop_var: __himmelblau_legacy_control
+    # Fail closed: a half-applied wire can admit out-of-group users; any failure unwires.
+    - name: Wire himmelblau into PAM and verify the result
       when: himmelblau_state == "present"
+      vars:
+        __himmelblau_pam_hb_re: '(?m)^\s*-?\w+\s+(?:\[[^\]]*\]|\S+)\s+\S*pam_himmelblau\.so.*$'
+        __himmelblau_pam_word_block_re: '^\s*-?\w+\s+(?:required|requisite)\s'
+        __himmelblau_pam_bracket_re: '\['
+        __himmelblau_pam_bracket_safe_re: 'default=ignore|ignore=ignore'
+        __himmelblau_pam_bracket_unsafe_re: 'ignore=(?!ignore)'
+        __himmelblau_pam_account_type_re: '\s*-?account\s'
+        __himmelblau_pam_control_re: '\[success=ok auth_err=die default=ignore\]'
+        __himmelblau_pam_auth_unix_re: '(?m)^\s*auth\s.*pam_unix\.so'
+        __himmelblau_pam_account_unix_re: '(?m)^\s*account\s.*pam_unix\.so'
+      block:
+        - name: Enable himmelblau in the PAM stack
+          ansible.builtin.command: pam-config --add --himmelblau
+          when: __himmelblau_pam_query.stdout | trim | length == 0
+          changed_when: true
+
+        # Rewrite pam-config's `required`, older releases' `sufficient` and 3.1.11's `end` to the
+        # upstream-declared control; `end` first, as pamd validates the whole file.
+        - name: Set the himmelblau account line to the upstream-declared control
+          community.general.pamd:
+            name: common-account
+            type: account
+            control: "{{ __himmelblau_legacy_control }}"
+            module_path: pam_himmelblau.so
+            new_control: "[success=ok auth_err=die default=ignore]"
+          loop:
+            - "[success=end auth_err=die default=ignore]"
+            - required
+            - sufficient
+          loop_control:
+            loop_var: __himmelblau_legacy_control
+
+        # ansible_check_mode misses the check_mode keyword; a command skips in both.
+        - name: Detect a dry run
+          ansible.builtin.command: /bin/true
+          register: __himmelblau_pam_dry_run
+          changed_when: false
+
+        - name: Read the wired PAM auth and account stacks
+          ansible.builtin.slurp:
+            src: "/etc/pam.d/{{ __himmelblau_pam_file }}"
+          loop:
+            - common-auth
+            - common-account
+          loop_control:
+            loop_var: __himmelblau_pam_file
+          register: __himmelblau_pam_stack
+          when: __himmelblau_pam_dry_run is not skipped
+
+        # The lock-out invariant and the declared account control.
+        - name: Verify the wired PAM stack cannot lock out local users and scopes login
+          ansible.builtin.assert:
+            that:
+              - __himmelblau_pam_auth is search(__himmelblau_pam_auth_unix_re)
+              - __himmelblau_pam_account is search(__himmelblau_pam_account_unix_re)
+              - >-
+                __himmelblau_pam_lines | select('search', __himmelblau_pam_word_block_re)
+                | reject('search', 'ignore_unknown_user') | list | length == 0
+              - >-
+                __himmelblau_pam_lines | select('search', __himmelblau_pam_bracket_re)
+                | reject('search', __himmelblau_pam_bracket_safe_re) | list | length == 0
+              - >-
+                __himmelblau_pam_lines | select('search', __himmelblau_pam_bracket_re)
+                | select('search', __himmelblau_pam_bracket_unsafe_re) | list | length == 0
+              - __himmelblau_pam_account_lines | length > 0
+              - >-
+                __himmelblau_pam_account_lines
+                | reject('search', __himmelblau_pam_control_re) | list | length == 0
+            fail_msg: >-
+              The PAM stack pam-config assembled is not safe: pam_unix is missing, a pam_himmelblau
+              line would block local users, or the himmelblau account line does not carry
+              [success=ok auth_err=die default=ignore]. pam_himmelblau lines:
+              {{ __himmelblau_pam_lines }}
+            quiet: true
+          when: __himmelblau_pam_dry_run is not skipped
+          vars:
+            __himmelblau_pam_auth: "{{ __himmelblau_pam_stack.results[0].content | b64decode }}"
+            __himmelblau_pam_account: "{{ __himmelblau_pam_stack.results[1].content | b64decode }}"
+            __himmelblau_pam_lines: >-
+              {{ (__himmelblau_pam_auth ~ '\n' ~ __himmelblau_pam_account)
+                 | regex_findall(__himmelblau_pam_hb_re) }}
+            __himmelblau_pam_account_lines: >-
+              {{ __himmelblau_pam_lines
+                 | select('match', __himmelblau_pam_account_type_re) | list }}
+      rescue:
+        - name: Unwire himmelblau from PAM after a failed or unsafe wiring
+          ansible.builtin.command: pam-config --delete --himmelblau
+          register: __himmelblau_pam_revert
+          changed_when: true
+          failed_when: false
+
+        - name: Re-read the PAM stacks after unwiring
+          ansible.builtin.slurp:
+            src: "/etc/pam.d/{{ __himmelblau_pam_file }}"
+          loop:
+            - common-auth
+            - common-account
+          loop_control:
+            loop_var: __himmelblau_pam_file
+          register: __himmelblau_pam_after
+          failed_when: false
+          when: __himmelblau_pam_revert is not skipped
+
+        - name: Fail after unwiring PAM
+          ansible.builtin.fail:
+            msg: >-
+              PAM wiring failed at '{{ ansible_failed_task.name }}':
+              {{ ansible_failed_result.msg | default('(no message)') }}
+              {{ ansible_failed_result.stderr | default('') }}
+              {{ ansible_failed_result.results | default([]) | selectattr('failed', 'defined')
+                 | selectattr('failed') | map(attribute='msg', default='') | list | join('; ') }}
+              {% if __himmelblau_pam_revert is skipped %}
+              Dry run: nothing was written or removed, and PAM is as it was before this run.
+              {% elif __himmelblau_pam_unwired %}
+              himmelblau was removed from PAM, so local logins work and tenant logins are off
+              until the cause is fixed and the role is re-run.
+              {% else %}
+              Removing himmelblau from PAM did not succeed
+              ({{ __himmelblau_pam_revert.stderr | default('', true) }}). From a root session
+              you already hold, run: pam-config --delete --himmelblau
+              {% endif %}
+          vars:
+            __himmelblau_pam_unwired: >-
+              {{ (__himmelblau_pam_revert.rc | default(1)) == 0
+                 and (__himmelblau_pam_after.results | default([])
+                      | map(attribute='content', default='') | map('b64decode')
+                      | select('search', 'pam_himmelblau') | list | length == 0)
+                 and (__himmelblau_pam_after.results | default([]) | length == 2) }}
 
 - name: Fail when PAM wiring is not implemented for this platform
   ansible.builtin.fail:

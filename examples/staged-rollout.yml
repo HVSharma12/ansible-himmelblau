@@ -5,18 +5,22 @@
 # Phase 1 (this playbook): install the packages and render
 # /etc/himmelblau/himmelblau.conf. The daemons are enabled but NOT started
 # (they will start on the next boot), and PAM/NSS are untouched, so host login
-# behaviour is unchanged - and because PAM is not configured, the
-# login-scoping guard is not triggered.
+# behaviour is unchanged. Login scoping is still required here: the rendered
+# config is what scopes login once PAM is wired. On a host an older release
+# already wired with a `sufficient` account line, this phase fails and names
+# the repair.
 #
 # Phase 2 (when the tenant is reachable): re-run the role with the defaults
 # restored (himmelblau_start_services, himmelblau_configure_pam and
-# himmelblau_configure_nss all back to true) plus himmelblau_pam_allow_groups
-# to wire NSS/PAM and start the daemons.
+# himmelblau_configure_nss all back to true) to wire NSS/PAM and start the
+# daemons.
 - name: Stage Himmelblau without activating it (phase 1)
   hosts: servers
   become: true
   vars:
     himmelblau_domain: contoso.onmicrosoft.com
+    himmelblau_pam_allow_groups:
+      - f3c9a7e4-7d5a-47e8-832f-3d2d92abcd12  # "Linux Users" Entra group GUID
     himmelblau_start_services: false
     himmelblau_configure_pam: false
     himmelblau_configure_nss: false

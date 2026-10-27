@@ -5,23 +5,31 @@
 Deploy and configure [Himmelblau](https://himmelblau-idm.org/) for Microsoft Entra ID
 authentication and identity on Linux.
 
-The role installs the Himmelblau packages, renders `/etc/himmelblau/himmelblau.conf`,
-wires NSS and PAM, masks `nscd`, and enables the `himmelblaud` / `himmelblaud-tasks` daemons.
+The role installs the Himmelblau packages from the SLE 16.1 base product, renders
+`/etc/himmelblau/himmelblau.conf`, wires NSS and PAM, masks `nscd`, and enables the
+`himmelblaud` / `himmelblaud-tasks` daemons.
 
 > ⚠️ **Lock-out risk.** This role modifies the PAM stack. Test against a VM with an
 > independent root rescue session before running it on any host you cannot physically recover.
+> After wiring, the role checks the assembled stack; if wiring fails or the result is unsafe, it
+> removes Himmelblau from PAM again (`pam-config --delete --himmelblau`) and fails, leaving local
+> logins working and tenant logins off. If that removal fails too, the error says so and names the
+> command to run by hand.
 
 ## Supported platforms
 
-The role targets SUSE distributions first.
-
 | Platform | Support status |
 |---|---|
-| SLE 16.1 | **Supported** — every change is integration-tested on SLE 16.1. |
-| SLE 16.1 Immutable (transactional) | **Supported** — package changes stage into a new snapshot and need a reboot; the role follows the Linux System Roles reboot contract via `himmelblau_transactional_update_reboot_ok`. |
+| SLE 16.1 or later | **Supported**; every change is integration-tested on SLE 16.1. |
+| SLE 16.1 Immutable (SL Micro, transactional) | **Supported** — package changes stage into a new snapshot and need a reboot; the role follows the Linux System Roles reboot contract via `himmelblau_transactional_update_reboot_ok`. |
 
-Other distributions are not supported; the role fails with a clear error if PAM or
-SSH management is enabled on them.
+On `present` the role refuses to run on anything other than SLES or SL Micro 16.1 or later.
+Earlier releases (SLE 15.x, SLE 16.0, openSUSE Leap) carry Himmelblau only in the third-party
+`network:idm` repository, which this role does not add, so they are not supported. A host wired by
+an earlier release of this role may carry the login-scoping defect under Security in
+[`CHANGELOG.md`](CHANGELOG.md); read it before touching the PAM stack by hand. SLES for SAP
+Applications and SLED are not supported either. Teardown (`himmelblau_state: absent`) is not
+version-gated, so a SUSE host wired by an older release can still be unwound.
 
 ## Transactional systems (SLE 16.1 Immutable)
 
@@ -37,7 +45,9 @@ Roles, controlled by `himmelblau_transactional_update_reboot_ok`:
   configuration change alike), but PAM/NSS wiring in the same run would still act on not-yet-live
   packages — so pair this with `himmelblau_configure_nss: false` and
   `himmelblau_configure_pam: false`, reboot at your convenience, then re-run the role with the
-  toggles on to finish the deployment.
+  toggles on to finish the deployment. On a host an older release wired with a `sufficient`
+  account line, that first run refuses before staging anything; repair it with
+  `himmelblau_configure_pam: true` first (see [Before you enable PAM](#before-you-enable-pam)).
 - unset (the default) — the role **fails** when a reboot would be required, so the decision is
   never made implicitly.
 
@@ -45,7 +55,7 @@ On non-transactional systems the variable is ignored and the role never reboots 
 
 ## Requirements
 
-- **ansible-core >= 2.18** — the version SLES 16 ships, and the role's `min_ansible_version`.
+- **ansible-core >= 2.20** — the version SLE 16.1 ships, and the role's `min_ansible_version`.
 - The `community.general` collection (see
   [`meta/collection-requirements.yml`](meta/collection-requirements.yml)).
 - An Entra ID tenant **or** a standards-compliant OIDC issuer. For Entra, set `himmelblau_domain`;
@@ -95,7 +105,7 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 | `himmelblau_domain` | `""` | Entra ID domain users authenticate against. **Required for Entra**; optional only when `oidc_issuer_url` is set, since OIDC users need not sign in with a UPN. Rendered only when set. |
 | `himmelblau_app_id` | `""` | Application (client) ID. **Required when `oidc_issuer_url` is set** — it is the OIDC client id. For Entra you will **almost never set it**: only for specific cases such as enumerating groups or reading extended attributes (e.g. `gidNumber` for RFC 2307 idmapping). Rendered only when set. |
 | `himmelblau_oidc_issuer_url` | `""` | OIDC issuer URL. **Setting it selects OIDC** (Keycloak, Authentik, Zitadel, …); leave empty for Entra. Must **exactly** match the provider's advertised issuer (incl. path) or discovery fails. Requires `app_id`. Rendered only when set. |
-| `himmelblau_pam_allow_groups` | `[]` | Users and groups allowed to log in. Empty = allow all. Entra: group Object ID GUIDs (names are not unique) and/or user UPNs. Generic OIDC: the value emitted in the `groups` / `realm_access.roles` / `resource_access` roles claim — **Himmelblau 4.0+ only; on earlier builds (including the 3.1.11 SLE 16.1 ships) list users instead** — see [Generic OIDC](#generic-oidc). |
+| `himmelblau_pam_allow_groups` | `[]` | Users and groups allowed to log in: a list of non-blank entries. Empty (allow-all) is refused unless `himmelblau_pam_allow_no_groups: true`. Entra: group Object ID GUIDs (names are not unique) and/or user UPNs. Generic OIDC: the value emitted in the `groups` / `realm_access.roles` / `resource_access` roles claim — **Himmelblau 4.0+ only; on earlier builds (including the 3.1.14 SLE 16.1 ships) list users instead** — see [Generic OIDC](#generic-oidc). |
 | `himmelblau_local_groups` | `[]` | Local groups mapped users are added to (e.g. `["wheel"]`). |
 | `himmelblau_idmap_range` | `"200000-2000200000"` | POSIX UID/GID mapping range. |
 | `himmelblau_shell` | `"/bin/bash"` | Default login shell for mapped users. |
@@ -110,7 +120,7 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 | `himmelblau_transactional_update_reboot_ok` | `null` | Transactional-update systems (SLE 16.1 Immutable) only. When a staged package change requires a reboot: `true` — the role reboots to apply it; `false` — the role notifies and continues, allowing custom handling (note: PAM/NSS wiring in the *same* run needs the packages live, so pair with `configure_nss/pam: false` and re-run after your reboot); unset — the role **fails**, ensuring the reboot requirement is not overlooked. Ignored on non-transactional systems. See [Transactional systems (SLE 16.1 Immutable)](#transactional-systems-sle-161-immutable). |
 | `himmelblau_configure_nss` | `true` | Wire `/etc/nsswitch.conf` and mask `nscd`. |
 | `himmelblau_configure_pam` | `true` | Configure the PAM stack (via `pam-config` on SUSE). |
-| `himmelblau_pam_allow_no_groups` | `false` | Permit wiring PAM with no allow-group restriction (allow-all login). Leave `false` to require `himmelblau_pam_allow_groups` scoping; set `true` only to consciously accept allow-all login (admin groups do **not** satisfy the guard) — see [Before you enable PAM](#before-you-enable-pam). |
+| `himmelblau_pam_allow_no_groups` | `false` | Permit a config with no allow-group restriction (allow-all login), whether or not this run wires PAM. Leave `false` to require `himmelblau_pam_allow_groups` scoping; set `true` only to consciously accept allow-all login (admin groups do **not** satisfy the guard) — see [Before you enable PAM](#before-you-enable-pam). |
 | `himmelblau_start_services` | `true` | Start (and restart on change) the `himmelblaud` daemons. Set `false` to enable-but-not-start — deploy config before an Entra tenant is reachable, or for tenant-less CI. Activation needs a working tenant. |
 | `himmelblau_configure_ssh` | `false` | Opt-in: install the Himmelblau sshd config so Entra users can SSH in. Off by default (fleet lock-out vector; upstream denies SSH password-only by default — override via `password_only_remote_services_deny_list` in `extra_config`). When enabled with `start_services: true`, the role **restarts** sshd so it loads the new NSS module (a reload won't); the active connection survives (`KillMode=process`). Note: `su` to an Entra user is a known SSO limitation — use SSH/console login. |
 | `himmelblau_sudo_groups` | `[]` | Entra group GUIDs whose members get sudo (rendered with `local_sudo_group` when set). |
@@ -123,11 +133,19 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 
 `himmelblau_configure_pam` defaults to `true`, so the role wires Himmelblau into the host PAM stack
 by default. Because `himmelblau_pam_allow_groups` is the **only** key that scopes who can log in (leave
-it empty and **every** user in the tenant or OIDC realm can authenticate), the role **refuses to
-configure PAM** unless login is scoped or allow-all is explicitly accepted:
+it empty and **every** user in the tenant or OIDC realm can authenticate), a `present` run
+**refuses to converge** unless login is scoped or allow-all is explicitly accepted. This holds with
+`himmelblau_configure_pam: false` too: the config is rendered either way, and PAM may already be
+wired by an earlier run. Such a run also refuses, before changing anything, when Himmelblau is
+already in the PAM stack but `/etc/pam.d/common-account` has no pam_himmelblau account line that
+denies out-of-group users — the line is missing, or its control does not deny (such as the
+`sufficient` that 1.1.x and earlier wrote). A run with `himmelblau_configure_pam: true` rewrites
+a `sufficient` or `required` account line; any other control, a missing line or a `-account` line
+must be fixed by hand, or Himmelblau removed from PAM with `pam-config --delete --himmelblau`.
 
-- `himmelblau_pam_allow_groups` — scope login to named Entra group GUIDs, user UPNs, or generic
-  OIDC claim values (see [Generic OIDC](#generic-oidc) for which apply on your version), **or**
+- `himmelblau_pam_allow_groups` — a list of non-blank entries scoping login to named Entra group
+  GUIDs, user UPNs, or generic OIDC claim values (see [Generic OIDC](#generic-oidc) for which apply
+  on your version), **or**
 - `himmelblau_pam_allow_no_groups: true` — consciously accept allow-all login for everyone the
   provider will authenticate.
 
@@ -167,7 +185,7 @@ uses its native Entra flow when the issuer is empty. In this mode:
   role claims — the exact value emitted in the userinfo `groups`, `realm_access.roles`, or
   `resource_access` roles claim. On **earlier builds an OIDC token carries no group claims**, so
   list the users instead, by the name they sign in with (e.g. `alice@id.example.org`); that also
-  works on 4.0+. SLE 16.1 currently ships Himmelblau 3.1.11, so a user list is what works there
+  works on 4.0+. SLE 16.1 currently ships Himmelblau 3.1.14, so a user list is what works there
   today. Anyone not listed is denied at the PAM account phase **after** a successful IdP sign-in.
   The allow-all opt-in (`himmelblau_pam_allow_no_groups: true`) works as on Entra.
 

@@ -6,6 +6,39 @@ All notable changes to this role are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-27
+
+### Added
+- After wiring PAM, the role checks the assembled `common-auth` and `common-account`: `pam_unix`
+  is present, no blocking `pam_himmelblau` line lacks `ignore_unknown_user`, and the account line
+  carries `[success=ok auth_err=die default=ignore]`. If wiring fails or the check fails, the role
+  runs `pam-config --delete --himmelblau` and fails, so local logins keep working and tenant logins
+  stay off until the cause is fixed and the role is re-run. If that removal fails too, the error
+  says so and names the command to run by hand.
+
+### Changed
+- **BREAKING — the login-scoping check applies to every `present` run**, including runs with
+  `himmelblau_configure_pam: false`. The role writes `himmelblau.conf` on every run, and PAM may
+  already be wired, so an empty `himmelblau_pam_allow_groups` would admit every tenant user. A
+  playbook with `himmelblau_configure_pam: false` that sets neither `himmelblau_pam_allow_groups`
+  nor `himmelblau_pam_allow_no_groups: true` now fails (with `true` it already did); set one of
+  the two. `himmelblau_pam_allow_groups` must be a list of non-blank
+  entries: a string, or a list with a blank entry, is refused. `examples/staged-rollout.yml`
+  now sets the allow list.
+- **BREAKING — a run with `himmelblau_configure_pam: false` refuses an unsafe PAM stack.** It
+  leaves PAM alone but fails, before changing anything, when Himmelblau is in the PAM stack and
+  `/etc/pam.d/common-account` has no `pam_himmelblau` account line that denies out-of-group users
+  (such as the `sufficient` that 1.1.x and earlier wrote). A run with
+  `himmelblau_configure_pam: true` rewrites a `sufficient` or `required` account line; any other
+  control, a missing line or a `-account` line must be fixed by hand, or Himmelblau removed with
+  `pam-config --delete --himmelblau`.
+- **BREAKING — ansible-core 2.20 or later is required** (the version SLE 16.1 ships and the
+  integration tests run); `min_ansible_version` was 2.18.
+- `meta/main.yml` declares the platform as SLES 16 instead of every SLES release. SLE 16.1 or later
+  is still required, and the role refuses earlier releases at run time.
+- The lint workflow runs on Python 3.13 with ansible-core 2.20.2, ansible-lint 26.4.0 and
+  yamllint 1.38.0.
+
 ## [1.2.1] - 2026-09-18
 
 ### Added
@@ -53,8 +86,8 @@ All notable changes to this role are documented in this file. The format follows
   base product, so the role installs from there and no longer adds the third-party `network:idm`
   repository. The managed hosts must already be registered with the SUSE Customer Center (or an
   RMT/SMT mirror). SLE 15.x, SLE 16.0, openSUSE Leap and Tumbleweed carry Himmelblau only in
-  `network:idm` and are **no longer supported** — stay on the `v1.x` series for those, noting the
-  login-scoping defect recorded under Security below, which v1.x carries.
+  `network:idm` and are **no longer supported** — stay on release 1.1.x or earlier for those,
+  noting the login-scoping defect recorded under Security below, which those releases carry.
 - Published under the SUSE organisation: the role's Galaxy name in `meta/main.yml` is now
   `suse.himmelblau` (namespace `suse`; author and company SUSE). Installed from git as the README
   describes, the role is still referenced as `ansible-himmelblau`.
@@ -80,31 +113,31 @@ All notable changes to this role are documented in this file. The format follows
   authenticate anyone, and the role now refuses it. **One case changes behaviour silently:** if a
   playbook set `himmelblau_oidc_issuer_url` while leaving `himmelblau_idp_provider` at its `entra`
   default, the issuer was previously rendered nowhere and ignored. It now selects OIDC on its own —
-  **clear the issuer** to stay on Entra. (Such a playbook also needs `himmelblau_app_id`, so it
-  fails the pre-flight assert rather than silently switching provider mid-converge.)
+  **clear the issuer** to stay on Entra. With `himmelblau_app_id` empty, such a playbook fails the
+  pre-flight assert; with it set, the host switches to generic OIDC on the next converge.
 - **BREAKING — the repository variables and tasks are removed.** `himmelblau_manage_repo`,
   `himmelblau_repo_url`, and the repository add/remove tasks are gone; there is no repository for
   the role to manage, and no mirror knob — package sourcing follows the host's registration.
 - Teardown no longer removes a repository, because it never adds one. Note for hosts wired by the
-  v1.x series: the `network:idm` repository v1.x added is therefore not removed by this version's
-  teardown — unwind it with v1.x or remove it manually.
+  1.1.x series: the `network:idm` repository it added is therefore not removed by this version's
+  teardown — unwind it with 1.1.x or remove it manually.
 
 ### Security
 - **Login scoping could be bypassed on Himmelblau >= 3.1.8 (SLE 16.1 ships 3.1.11).** Every
-  earlier release of this role (v1.0.0 and v1.1.0) set the Himmelblau
+  earlier release of this role (1.0.0 and 1.1.0) set the Himmelblau
   `account` line to `sufficient`; once Himmelblau began serving synthetic shadow entries,
   `pam_unix` no longer refused Entra ID users, so a user **outside** `himmelblau_pam_allow_groups`
   who authenticated successfully was let in. This release writes the control Himmelblau itself
   declares, `[success=ok auth_err=die default=ignore]`, which denies out-of-group users terminally
   and leaves local users on `pam_unix`. **Remedy:** on SLE 16.1 hosts, re-run this release — it
   repairs the line automatically. On hosts this release refuses to run on (SLE 15.x, SLE 16.0,
-  openSUSE — the v1.x platforms), **check the installed version first with `rpm -q himmelblau`:**
+  openSUSE — the 1.1.x platforms), **check the installed version first with `rpm -q himmelblau`:**
   - **3.1.8 or later** — the bypass applies. Regenerate the safe line with
     `pam-config --add --himmelblau` (it writes `required`, which also denies out-of-group users),
-    and do not run a v1.x release against the host again, because its PAM step re-applies
+    and do not run a release before 1.2.0 against the host again, because its PAM step re-applies
     `sufficient`.
   - **Older than 3.1.8** — the bypass does **not** apply: without synthetic shadow entries
-    `pam_unix` already refuses the out-of-group user, which is why v1.x used `sufficient` there.
+    `pam_unix` already refuses the out-of-group user, which is why 1.1.x and earlier used `sufficient` there.
     **Do not apply `required` or `[success=ok auth_err=die default=ignore]` on these hosts** — with
     no shadow entry the following `account required pam_unix.so` returns `PAM_AUTHINFO_UNAVAIL` and
     the account phase fails for **every** Entra user, in-group included, over console, `su` and
