@@ -1,0 +1,149 @@
+---
+argument_specs:
+  main:
+    short_description: Deploy Himmelblau for Entra ID or OIDC login on SLE 16.1.
+    description: >
+      Installs and configures Himmelblau so users from Microsoft Entra ID
+      or a generic OIDC provider can log in, and wires NSS and PAM.
+    options:
+      himmelblau_domain:
+        type: str
+        default: ""
+        description: >
+          Entra ID domain users authenticate against. Required for Entra;
+          optional when himmelblau_oidc_issuer_url is set.
+      himmelblau_app_id:
+        type: str
+        default: ""
+        description: >
+          Application (client) ID. Required when himmelblau_oidc_issuer_url
+          is set, as the OIDC client id; rarely needed for Entra.
+      himmelblau_oidc_issuer_url:
+        type: str
+        default: ""
+        description: >
+          OIDC issuer URL. Setting it selects generic OIDC; empty means
+          Entra. Must exactly match the provider's advertised issuer.
+      himmelblau_pam_allow_groups:
+        type: list
+        elements: str
+        default: []
+        description: >
+          Users and groups allowed to log in, as non-blank entries. Empty
+          is refused unless himmelblau_pam_allow_no_groups is true.
+      himmelblau_local_groups:
+        type: list
+        elements: str
+        default: []
+        description: Local groups mapped users are added to.
+      himmelblau_idmap_range:
+        type: str
+        default: "200000-2000200000"
+        description: POSIX UID/GID mapping range.
+      himmelblau_shell:
+        type: str
+        default: /bin/bash
+        description: Default login shell for mapped users.
+      himmelblau_enable_hello:
+        type: bool
+        default: true
+        description: >
+          Windows Hello PIN enrollment. With generic OIDC, set false if the
+          client does not allow refresh tokens.
+      himmelblau_home_attr:
+        type: str
+        default: ""
+        description: >
+          Attribute that names the home directory. Rendered only when set.
+      himmelblau_home_alias:
+        type: str
+        default: ""
+        description: >
+          Alternative home directory naming. Rendered only when set.
+      himmelblau_home_prefix:
+        type: str
+        default: ""
+        description: Home directory prefix. Rendered only when set.
+      himmelblau_logon_token_app_id:
+        type: str
+        default: ""
+        description: >
+          Separate app (client) ID for logon-token scopes. Rendered only
+          when set.
+      himmelblau_user_map_file:
+        type: str
+        default: ""
+        description: >
+          Path to an external name-mapping file. The role writes the key
+          only, not the file.
+      himmelblau_extra_config:
+        type: dict
+        default: {}
+        description: >
+          Extra [global] keys merged verbatim. A typed variable that the
+          role renders wins over the same key here.
+      himmelblau_state:
+        type: str
+        default: present
+        description: >
+          present to deploy; absent to revert PAM and NSS, remove the
+          config and uninstall the packages.
+      himmelblau_transactional_update_reboot_ok:
+        type: raw
+        default: null
+        description: >
+          Transactional systems only, when a staged package change needs a
+          reboot. true reboots, false notifies and continues, null fails.
+      himmelblau_configure_nss:
+        type: bool
+        default: true
+        description: Wire /etc/nsswitch.conf and mask nscd.
+      himmelblau_configure_pam:
+        type: bool
+        default: true
+        description: Configure the PAM stack with pam-config.
+      himmelblau_pam_allow_no_groups:
+        type: bool
+        default: false
+        description: >
+          Accept a config with no allow-group restriction (allow-all
+          login), whether or not this run wires PAM.
+      himmelblau_start_services:
+        type: bool
+        default: true
+        description: >
+          Start, and restart on change, the Himmelblau daemons. false
+          enables them without starting.
+      himmelblau_configure_ssh:
+        type: bool
+        default: false
+        description: >
+          Install the Himmelblau sshd config so Entra users can log in over
+          SSH.
+      himmelblau_sudo_groups:
+        type: list
+        elements: str
+        default: []
+        description: Entra group GUIDs whose members get sudo.
+      himmelblau_local_sudo_group:
+        type: str
+        default: sudo
+        description: >
+          Local group himmelblau_sudo_groups members join. Rendered only
+          when himmelblau_sudo_groups is set.
+      himmelblau_offline_breakglass_enabled:
+        type: bool
+        default: false
+        description: >
+          Emergency offline MFA bypass. Renders an [offline_breakglass]
+          section when true.
+      himmelblau_offline_breakglass_ttl:
+        type: int
+        default: 7200
+        description: Offline break-glass TTL in seconds.
+      himmelblau_packages:
+        type: list
+        elements: str
+        description: >
+          Packages to install. Defaults to the distribution's list; override
+          only to pin or customize.
