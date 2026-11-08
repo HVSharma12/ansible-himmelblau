@@ -6,6 +6,8 @@ All notable changes to this role are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-09
+
 ### Added
 - `meta/argument_specs.yml` declares every public variable, so a `himmelblau_state` other than
   `present` or `absent`, or a value Ansible cannot convert to a variable's declared type, is
