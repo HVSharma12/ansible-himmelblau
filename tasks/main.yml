@@ -150,7 +150,9 @@
     - himmelblau_state == "present"
     - __himmelblau_is_transactional | d(false)
     - __himmelblau_package_result is defined
-    - __himmelblau_package_result is changed
+    - >-
+      __himmelblau_package_result is changed
+      or (__himmelblau_packages_live.rc | d(0)) != 0
 
 - name: Configure himmelblau (render on present, remove on absent)
   ansible.builtin.include_tasks: configure.yml
@@ -189,3 +191,6 @@
       (__himmelblau_package_result is defined and __himmelblau_package_result is changed)
       or (__himmelblau_sshd_package_result is defined
           and __himmelblau_sshd_package_result is changed)
+      or (__himmelblau_packages_live.stdout_lines | d([])
+          | reject('search', 'no package provides') | list | length > 0)
+      or (__himmelblau_sshd_package_live.rc | d(1)) == 0

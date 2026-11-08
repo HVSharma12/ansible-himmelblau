@@ -38,8 +38,9 @@ new snapshot and only becomes live after a reboot. The role detects such systems
 presence of `transactional-update`) and applies the reboot contract used across Linux System
 Roles, controlled by `himmelblau_transactional_update_reboot_ok`:
 
-- `true` — after staging a package change the role reboots the host, waits for it to return, and
-  continues: NSS/PAM wiring then runs against the live packages. One converge deploys end to end.
+- `true` — when a package change is staged, by this run or an earlier one, and not live yet, the
+  role reboots the host, waits for it to return, and continues: NSS/PAM wiring then runs against
+  the live packages. One converge deploys end to end.
 - `false` — the role notifies that a reboot is required and continues without one. Units that are
   not live yet are skipped rather than failed (the enable/start step and the restart on a
   configuration change alike), but PAM/NSS wiring in the same run would still act on not-yet-live
