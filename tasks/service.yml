@@ -5,7 +5,7 @@
 # start a unit whose SupplementaryGroups names a missing group — failing with status=216/GROUP
 # ("Failed at step GROUP") — and the `tss` group is absent on a minimal SLE/openSUSE image (the TPM2
 # stack is not installed). himmelblau uses a software-HSM fallback when no TPM is present, so the
-# group only needs to EXIST for the daemon to start. Caught by the live-tenant test.
+# group only needs to EXIST for the daemon to start.
 - name: Ensure the tss group required by himmelblaud.service exists
   ansible.builtin.group:
     name: tss

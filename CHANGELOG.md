@@ -6,6 +6,21 @@ All notable changes to this role are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+- `meta/argument_specs.yml` declares every public variable, so a `himmelblau_state` other than
+  `present` or `absent`, or a value Ansible cannot convert to a variable's declared type, is
+  refused before the first task runs.
+
+### Fixed
+- On a transactional system the reboot contract also applies when an earlier run staged the
+  packages without rebooting (for example a first run that stopped because
+  `himmelblau_transactional_update_reboot_ok` was unset). The re-run used to see the packages as
+  installed, skip the reboot and fail wiring PAM against a module that was not live yet.
+- A list value in `himmelblau_extra_config` renders comma-joined, like the typed list variables,
+  instead of as a Python list.
+- The platform refusal message and the README no longer claim that openSUSE carries Himmelblau
+  only in `network:idm`.
+
 ## [2.0.0] - 2026-10-27
 
 ### Added

@@ -85,6 +85,9 @@ argument_specs:
       himmelblau_state:
         type: str
         default: present
+        choices:
+          - present
+          - absent
         description: >
           present to deploy; absent to revert PAM and NSS, remove the
           config and uninstall the packages.
