@@ -13,11 +13,17 @@
 # although it is not live yet; the live rpm database tells.
 - name: Check whether the packages are live on a transactional update system
   ansible.builtin.command:  # noqa command-instead-of-module
-    argv: "{{ ['rpm', '-q', '--whatprovides'] + himmelblau_packages }}"
+    argv: "{{ ['rpm', '-q', '--whatprovides'] + __himmelblau_rpm_names }}"
+  vars:
+    # rpm resolves names and capabilities, not a zypper version constraint.
+    __himmelblau_rpm_names: >-
+      {{ [himmelblau_packages] | flatten | map('regex_replace', '\s*[<>=].*$', '') | list }}
   environment:
     LC_ALL: C
   register: __himmelblau_packages_live
   changed_when: false
   failed_when: false
   check_mode: false
-  when: __himmelblau_is_transactional | d(false)
+  when:
+    - __himmelblau_is_transactional | d(false)
+    - himmelblau_packages | length > 0

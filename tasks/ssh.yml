@@ -34,6 +34,8 @@
 - name: Check whether the sshd config package is live on a transactional update system
   ansible.builtin.command:  # noqa command-instead-of-module
     argv: [rpm, -q, --whatprovides, "{{ __himmelblau_sshd_package }}"]
+  environment:
+    LC_ALL: C
   register: __himmelblau_sshd_package_live
   changed_when: false
   failed_when: false

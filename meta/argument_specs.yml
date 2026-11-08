@@ -148,5 +148,5 @@ argument_specs:
         type: list
         elements: str
         description: >
-          Packages to install. Defaults to the distribution's list; override
-          only to pin or customize.
+          Packages to install: package names or capabilities, optionally with a
+          version constraint. Defaults to the distribution's list.

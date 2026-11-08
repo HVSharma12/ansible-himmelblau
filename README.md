@@ -130,7 +130,7 @@ All variables are defined in [`defaults/main.yml`](defaults/main.yml).
 | `himmelblau_local_sudo_group` | `"sudo"` | Local group `sudo_groups` members join (rendered only when `sudo_groups` is set). |
 | `himmelblau_offline_breakglass_enabled` | `false` | Opt-in emergency offline MFA bypass; renders an `[offline_breakglass]` section when `true`. |
 | `himmelblau_offline_breakglass_ttl` | `7200` | Offline break-glass TTL in seconds (used when enabled). A larger value widens the offline-authentication window — keep it as small as recovery needs allow. |
-| `himmelblau_packages` | distro list | Override to pin/customize the installed packages. |
+| `himmelblau_packages` | distro list | Override to pin/customize the installed packages: package names or capabilities, optionally with a version constraint (`himmelblau>=3.1`). |
 
 ## Before you enable PAM
 

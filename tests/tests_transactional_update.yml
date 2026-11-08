@@ -140,6 +140,36 @@
         himmelblau_transactional_update_reboot_ok: false
         __himmelblau_is_transactional: true
 
+# Leg 3b: packages live and unchanged, reboot_ok unset — the live rpm check must find every package
+# (a version-pinned list included), so the contract never fires on a converged host.
+- name: Transactional contract leg 3b — live packages never trigger the contract
+  hosts: all
+  become: true
+  tasks:
+    - name: Converge with the packages live, the flag injected and reboot_ok unset
+      ansible.builtin.include_role:
+        name: ansible-himmelblau
+      vars:
+        himmelblau_domain: example.onmicrosoft.com
+        himmelblau_pam_allow_no_groups: true
+        himmelblau_configure_nss: false
+        himmelblau_configure_pam: false
+        himmelblau_start_services: false
+        himmelblau_packages: "{{ __pkgs }}"
+        __himmelblau_is_transactional: true
+      loop:
+        - [himmelblau, nss-himmelblau, pam-himmelblau, himmelblau-sso]
+        - [himmelblau>=1, nss-himmelblau, pam-himmelblau, himmelblau-sso]
+      loop_control:
+        loop_var: __pkgs
+
+    - name: Assert the live check ran and found every package
+      ansible.builtin.assert:
+        that:
+          - __himmelblau_packages_live.rc is defined
+          - __himmelblau_packages_live.rc == 0
+        quiet: true
+
 # Leg 4: leg 1 covers only the install-side include; leg 3 reinstalled, so teardown is real.
 - name: Transactional contract leg 4 — the removal-side include fires (rescued negative)
   hosts: all
