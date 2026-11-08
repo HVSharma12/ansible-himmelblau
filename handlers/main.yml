@@ -27,7 +27,7 @@
 # users as "Invalid user" (getpwnam misses the new module). The SUSE SLE16 docs say the same:
 # create sshd_config.d/himmelblau.conf, then RESTART the SSH service. Restart is safe
 # for the running ansible connection: SUSE's sshd runs KillMode=process, so restarting the
-# listener leaves established sessions (including ours) alive — confirmed on a live VM.
+# listener leaves established sessions (including ours) alive.
 - name: Restart sshd
   ansible.builtin.systemd_service:
     name: sshd

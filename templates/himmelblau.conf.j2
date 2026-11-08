@@ -55,8 +55,9 @@ local_sudo_group = {{ himmelblau_local_sudo_group }}
 {% if himmelblau_oidc_issuer_url | length > 0 %}{% set __ns.typed = __ns.typed + ['oidc_issuer_url'] %}{% endif %}
 {% if himmelblau_sudo_groups | length > 0 %}{% set __ns.typed = __ns.typed + ['sudo_groups', 'local_sudo_group'] %}{% endif %}
 {% for key, value in (himmelblau_extra_config | dictsort) if key not in __ns.typed %}
-{# A YAML bool would render Python-cased True/False; emit INI-style lowercase like the typed keys. #}
-{{ key }} = {{ (value | ternary('true', 'false')) if (value | type_debug) == 'bool' else value }}
+{# Render bools lowercase and lists comma-joined, like the typed keys. #}
+{{ key }} = {{ (value | ternary('true', 'false')) if (value | type_debug) == 'bool'
+   else (value | join(',')) if (value | type_debug) == 'list' else value }}
 {% endfor %}
 {% if himmelblau_offline_breakglass_enabled | bool %}
 

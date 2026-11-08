@@ -296,7 +296,7 @@
           Ansible-managed header.
         quiet: true
 
-# Negative leg: a himmelblau_state typo must abort at the enum guard, not
+# Negative leg: a himmelblau_state typo must abort at argument validation, not
 # silently drive a partial teardown. Tenant-less — the guard is pre-flight; no state change.
 - name: State enum guard rejects an invalid himmelblau_state
   hosts: all
@@ -304,7 +304,7 @@
   tasks:
     - name: Run the role with a bogus state (expect a guard abort)
       block:
-        - name: Include the role — should fail at the state enum guard
+        - name: Include the role — should fail at argument validation
           ansible.builtin.include_role:
             name: ansible-himmelblau
           vars:
@@ -315,10 +315,10 @@
           ansible.builtin.fail:
             msg: "Expected the state enum guard to abort the run, but the role completed."
       rescue:
-        - name: Confirm the abort was the state enum guard (not some other error)
+        - name: Confirm the abort was the state choices check (not some other error)
           ansible.builtin.assert:
             that:
-              - "'himmelblau_state must be' in (ansible_failed_result.msg | default(''))"
+              - "'must be one of: present, absent' in (ansible_failed_result.msg | default(''))"
             fail_msg: >-
               Role failed, but not on the state enum guard. Got:
               {{ ansible_failed_result.msg | default('(no msg)') }}

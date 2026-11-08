@@ -65,8 +65,7 @@
       This role supports SLES 16.1+ and SL-Micro 16.1+ (the Immutable variant) only — it installs
       Himmelblau from the SLE 16.1 base product and adds no repository. This host is
       {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
-      SLE 15.x, SLE 16.0 and openSUSE carry Himmelblau only in the third-party network:idm
-      repository, which this role does not manage. The SAP and Desktop variants (SLES_SAP /
+      SLE 15.x, SLE 16.0 and openSUSE are not supported. The SAP and Desktop variants (SLES_SAP /
       SLED) are not supported; raise an issue if you need them. Registration with the SUSE
       Customer Center (or an RMT/SMT mirror) is also required — without it the packages will not
       resolve.
@@ -150,7 +149,9 @@
     - himmelblau_state == "present"
     - __himmelblau_is_transactional | d(false)
     - __himmelblau_package_result is defined
-    - __himmelblau_package_result is changed
+    - >-
+      __himmelblau_package_result is changed
+      or (__himmelblau_packages_live.rc | d(0)) != 0
 
 - name: Configure himmelblau (render on present, remove on absent)
   ansible.builtin.include_tasks: configure.yml
@@ -189,3 +190,6 @@
       (__himmelblau_package_result is defined and __himmelblau_package_result is changed)
       or (__himmelblau_sshd_package_result is defined
           and __himmelblau_sshd_package_result is changed)
+      or (__himmelblau_packages_live.stdout_lines | d([])
+          | reject('search', 'no package provides') | list | length > 0)
+      or (__himmelblau_sshd_package_live.rc | d(1)) == 0

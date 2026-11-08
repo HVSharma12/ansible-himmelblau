@@ -35,6 +35,7 @@
       idmap_range: "999-999"
       # A YAML boolean must render INI-lowercase (true/false), not Python-cased True/False.
       enable_experimental_mfa: true
+      password_only_remote_services_deny_list: [sshd, cockpit]
     # Tenant-less CI: configure but don't start the daemon — it needs a real tenant.
     himmelblau_start_services: false
     himmelblau_offline_breakglass_enabled: true
@@ -76,6 +77,7 @@
           pam_allow_groups: SHOULD-NOT-WIN
           idmap_range: "999-999"
           enable_experimental_mfa: true
+          password_only_remote_services_deny_list: [sshd, cockpit]
         himmelblau_start_services: false
         himmelblau_offline_breakglass_enabled: true
         himmelblau_offline_breakglass_ttl: 3600
@@ -112,6 +114,7 @@
           - "'cache_timeout = 300' in __content"
           - "'local_sudo_group = viaext' in __content"
           - "'local_groups = wheel,users' in __content"
+          - "'password_only_remote_services_deny_list = sshd,cockpit' in __content"
           # Two-element list must render as a comma-joined value (join(',')), exactly once.
           - "(('pam_allow_groups = ' ~ __g1 ~ ',' ~ __g2) in __content)"
           - "'[offline_breakglass]' in __content"
